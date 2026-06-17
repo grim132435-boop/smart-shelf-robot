@@ -1,0 +1,65 @@
+[cfg] arm joints=['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6']
+[world] cuboid 8개 (floor+책상+3단)
+[warmup] ...
+[ready] cuRobo MotionGen
+[grasp] 후보 9개 생성 (캔 상단부 side, base프레임)
+
+=== [1] plan_grasp ===
+  success=tensor([True], device='cuda:0') status=None
+    grasp_trajectory: torch.Size([62, 6])
+    retract_trajectory: torch.Size([31, 6])
+    grasp_interpolated_trajectory: torch.Size([86, 6])
+    goalset_index: torch.Size([])
+    planning_time: 3.046250581741333
+    [속성목록] ['approach_result', 'goalset_index', 'goalset_result', 'grasp_interpolated_trajectory', 'grasp_interpolation_dt', 'grasp_result', 'grasp_trajectory', 'grasp_trajectory_dt', 'planning_time', 'retract_interpolated_trajectory', 'retract_interpolation_dt', 'retract_result', 'retract_trajectory', 'retract_trajectory_dt', 'status', 'success']
+
+=== [2] plan_goalset ===
+Traceback (most recent call last):
+  File "/home/devuser/shelf_grasp_dev/multiobj_pipeline/phase0_spike_plan_grasp.py", line 157, in main
+    res_gs = motion_gen.plan_goalset(start, grasp_poses, plan_cfg)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devuser/IsaacLab/src/curobo/src/curobo/wrap/reacher/motion_gen.py", line 1615, in plan_goalset
+    result = self._plan_attempts(
+             ^^^^^^^^^^^^^^^^^^^^
+  File "/home/devuser/IsaacLab/src/curobo/src/curobo/wrap/reacher/motion_gen.py", line 3017, in _plan_attempts
+    valid_query = self.update_pose_cost_metric(
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devuser/IsaacLab/src/curobo/src/curobo/wrap/reacher/motion_gen.py", line 2224, in update_pose_cost_metric
+    projected_pose = goal_pose.compute_local_pose(start_pose)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devuser/IsaacLab/src/curobo/src/curobo/types/math.py", line 452, in compute_local_pose
+    return self.inverse().multiply(world_pose)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devuser/miniconda3/envs/env_isaaclab/lib/python3.11/contextlib.py", line 81, in inner
+    return func(*args, **kwds)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/devuser/IsaacLab/src/curobo/src/curobo/types/math.py", line 385, in multiply
+    mat_mul = self.get_matrix() @ other_pose.get_matrix()
+              ^^^^^^^^^^^^^^^^^
+  File "/home/devuser/miniconda3/envs/env_isaaclab/lib/python3.11/contextlib.py", line 81, in inner
+    return func(*args, **kwds)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/devuser/IsaacLab/src/curobo/src/curobo/types/math.py", line 287, in get_matrix
+    full_mat = pose_to_matrix(self.position, self.quaternion, out_matrix)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devuser/IsaacLab/src/curobo/src/curobo/geom/transform.py", line 260, in pose_to_matrix
+    out_matrix[..., :3, :3] = quaternion_to_matrix(quaternion)
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devuser/IsaacLab/src/curobo/src/curobo/geom/transform.py", line 196, in quaternion_to_matrix
+    out_mat = QuatToMatrix.apply(quaternions, out_mat, adj_quaternion)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devuser/IsaacLab/_isaac_sim/exts/omni.isaac.ml_archive/pip_prebundle/torch/autograd/function.py", line 575, in apply
+    return super().apply(*args, **kwargs)  # type: ignore[misc]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devuser/IsaacLab/src/curobo/src/curobo/geom/transform.py", line 1292, in forward
+    b, _ = quaternion.shape
+    ^^^^
+ValueError: too many values to unpack (expected 2)
+  plan_goalset 예외: too many values to unpack (expected 2)
+
+=== [3] attach_spheres / detach ===
+  attach_spheres_to_robot OK (attached_object에 캔 스피어 4개 부착)
+  부착상태 plan_single success=tensor([False], device='cuda:0') status=MotionGenStatus.INVALID_START_STATE_SELF_COLLISION
+  detach_object_from_robot OK
+
+[Phase0 스파이크 종료]

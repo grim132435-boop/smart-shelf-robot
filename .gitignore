@@ -1,0 +1,13 @@
+# 대용량 로그·스크린샷 (포트폴리오 이미지는 Notion에서 관리)
+logs/
+
+# Python 캐시
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+
+# 제3자 라이브러리 클론(읽기 전용 참고)
+refs/

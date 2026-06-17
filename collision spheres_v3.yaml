@@ -1,0 +1,132 @@
+# The robot description defines the generalized coordinates and how to map those
+# to the underlying URDF dofs.
+
+api_version: 1.0
+
+# Defines the generalized coordinates. Each generalized coordinate is assumed
+# to have an entry in the URDF.
+# Lula will only use these joints to control the robot position.
+cspace:
+    - joint_1
+    - joint_2
+    - joint_3
+    - joint_4
+    - joint_5
+    - joint_6
+    - gripper_rh_l1
+    - gripper_rh_r1
+    - gripper_rh_l2
+    - gripper_rh_r2
+default_q: [
+    0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0
+]
+
+acceleration_limits: [
+   10,10,10,10,10,10,10,10,10,10
+]
+
+jerk_limits: [
+   10000,10000,10000,10000,10000,10000,10000,10000,10000,10000
+]
+
+# Most dimensions of the cspace have a direct corresponding element
+# in the URDF. This list of rules defines how unspecified coordinates
+# should be extracted or how values in the URDF should be overwritten.
+
+cspace_to_urdf_rules:
+
+# Lula uses collision spheres to define the robot geometry in order to avoid
+# collisions with external obstacles.  If no spheres are specified, Lula will
+# not be able to avoid obstacles.
+
+collision_spheres:
+  - base_link:
+    - "center": [0.0, 0.0, 0.062]
+      "radius": 0.06221
+  - link_1:
+    - "center": [-0.0, 0.023, -0.022]
+      "radius": 0.06978
+    - "center": [0.0, -0.002, -0.06]
+      "radius": 0.06343
+    - "center": [-0.0, 0.061, 0.004]
+      "radius": 0.0629
+  - link_2:
+    - "center": [0.372, 0.001, 0.153]
+      "radius": 0.06342
+    - "center": [0.002, -0.0, 0.152]
+      "radius": 0.0629
+    - "center": [0.19, -0.006, 0.198]
+      "radius": 0.05677
+    - "center": [0.084, -0.006, 0.187]
+      "radius": 0.05626
+    - "center": [0.297, -0.008, 0.196]
+      "radius": 0.05626
+  - link_3:
+    - "center": [0.0, 0.001, 0.017]
+      "radius": 0.058
+    - "center": [0.0, -0.053, 0.002]
+      "radius": 0.05
+    - "center": [0.0, -0.004, 0.079]
+      "radius": 0.06087
+  - link_4:
+    - "center": [0.0, -0.002, -0.243]
+      "radius": 0.04552
+    - "center": [0.005, 0.16, -0.046]
+      "radius": 0.03
+    - "center": [-0.001, 0.145, 0.01]
+      "radius": 0.0401
+    - "center": [0.001, -0.01, -0.251]
+      "radius": 0.0401
+    - "center": [-0.0, 0.143, -0.129]
+      "radius": 0.03767
+    - "center": [-0.003, 0.157, -0.051]
+      "radius": 0.03767
+    - "center": [-0.005, 0.071, -0.201]
+      "radius": 0.03444
+  - link_5:
+    - "center": [0.0, -0.01, 0.005]
+      "radius": 0.05234
+    - "center": [-0.0, 0.001, 0.077]
+      "radius": 0.052
+    - "center": [-0.0, -0.061, 0.001]
+      "radius": 0.051
+  - link_6:
+    - "center": [-0.0, 0.0, -0.047]
+      "radius": 0.05005
+  - gripper_rh_p12_rn_base:
+    - "center": [-0.007, -0.019, 0.039]
+      "radius": 0.02
+    - "center": [0.007, -0.02, 0.038]
+      "radius": 0.02
+    - "center": [-0.007, 0.003, 0.038]
+      "radius": 0.02
+    - "center": [0.008, 0.001, 0.038]
+      "radius": 0.02
+    - "center": [0.007, 0.02, 0.038]
+      "radius": 0.02
+    - "center": [-0.007, 0.019, 0.038]
+      "radius": 0.02
+  - gripper_rh_p12_rn_l1:
+    - "center": [0.001, -0.046, -0.002]
+      "radius": 0.017
+    - "center": [0.0, -0.061, 0.02]
+      "radius": 0.013
+    - "center": [0.0, -0.028, -0.007]
+      "radius": 0.02
+  - gripper_rh_p12_rn_l2:
+    - "center": [0.0, -0.011, 0.012]
+      "radius": 0.013
+    - "center": [-0.0, -0.003, 0.032]
+      "radius": 0.01
+  - gripper_rh_p12_rn_r1:
+    - "center": [-0.001, 0.028, -0.007]
+      "radius": 0.01975
+    - "center": [0.0, 0.045, 0.001]
+      "radius": 0.017
+    - "center": [-0.001, 0.06, 0.019]
+      "radius": 0.013
+  - gripper_rh_p12_rn_r2:
+    - "center": [-0.0, 0.002, 0.033]
+      "radius": 0.01
+    - "center": [0.0, 0.008, 0.013]
+      "radius": 0.013
