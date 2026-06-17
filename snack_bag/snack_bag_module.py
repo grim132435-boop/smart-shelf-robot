@@ -39,8 +39,8 @@ FLAT_USD   = os.path.join(_ASSET_DIR, "snack_bag.usd")                 # 얇은 
 
 # 검증된 particle cloth 파라미터(cloth6: 촘촘 베개 + 빳빳한 호일 느낌, 84mm 빵빵, 안정). 실측 BOPP 필름 반영.
 CLOTH_PARAMS = dict(
-    pressure=9.0,        # 질소 공기압. 12=단단(폭발), 7=너무물렁(눌리면 납작=잡을 puff 사라짐) → 9=잡을 puff 유지+클램프로 안정(iter2)
-    stretch=5000.0,      # ★웹: 1e4↑는 수치불안정(꿀렁임). 수천대가 안정(약간 신축은 감수)
+    pressure=11.0,       # 질소 공기압. 10→11: 옆스퀴즈 진입시 납작 방지·두께 유지(12 근처 폭발 주의)
+    stretch=8000.0,      # ★비신축↑(5000→8000): 옆 누르면 부피가 두께로(불룩 강화). 1e4↑는 꿀렁/스파이크
     bend=150.0,          # 과대 bend는 불안정 → 적당히
     shear=50.0,
     damping=4.0,         # 출렁임 제거(8↑은 폭발)
@@ -48,11 +48,13 @@ CLOTH_PARAMS = dict(
     sro=0.0025,          # solid_rest_offset
     # ★내용물(contents)/소성/B는 포기(2026-06-16) — PBD cm스케일서 cloth+내용물 반복 폭발, 탄성 수용.
     contents=False,
-    friction=1.6,        # 그리퍼 그립 마찰(1.0→1.6: puff 미끄럼 방지, 리프트 유지력↑ iter2)
+    friction=2.2,        # 그리퍼 그립 마찰(1.6→2.2: 옆스퀴즈 그립 유지력↑, 리프트시 안빠짐)
     pbd_damping=14.0,    # ★전역 입자 속도 감쇠(핀치 에너지 흡수 강화 10→14 — spring_damping↑은 폭발하므로 이걸로)
     max_velocity=1.0,    # ★입자 최대속도 제한(크러시시 폭발 속도 클램프 2→1)
     adhesion=0.0,        # B(접착 구김고정)는 접음 — C(알맹이)가 소성 담당
     adhesion_scale=1.0,
+    friction_scale=0.5,  # ★입자간 마찰(폴드 유지·내부 안정, DexGarmentLab)
+    gravity_scale=1.0,   # ★중력 명시(파티클 시스템이 중력 적용 — RigidBody API 아님)
     mass=0.052,          # 52g
 )
 
@@ -147,7 +149,7 @@ def _spawn_cloth(stage, scene_path, center_xy, rest_center_z, prim_path, params)
             stage, psys_path, simulation_owner=scene_path,
             contact_offset=params["pco"], rest_offset=params["pco"] * 0.8,
             particle_contact_offset=params["pco"], solid_rest_offset=params["sro"],
-            solver_position_iterations=32, enable_ccd=True,   # 안정 영역(과한 강성 없음 — 100은 과대)
+            solver_position_iterations=params.get("solver", 32), enable_ccd=True,   # 비신축(고stretch)엔 ↑ 필요(안정)
             non_particle_collision_enabled=True,   # 바닥/그리퍼 등 강체와 충돌
             max_velocity=params.get("max_velocity", 2.0),     # ★입자 속도 상한(출렁임 억제)
         )
@@ -156,8 +158,11 @@ def _spawn_cloth(stage, scene_path, center_xy, rest_center_z, prim_path, params)
         particleUtils.add_pbd_particle_material(
             stage, pmat_path, friction=params["friction"],
             damping=params.get("pbd_damping", 0.0),                    # ★전역 속도 감쇠(출렁임 제거)
-            adhesion=params.get("adhesion", 0.0),                      # 구겨진 층 들러붙음(구김 유지)
-            particle_adhesion_scale=params.get("adhesion_scale", 1.0),
+            adhesion=params.get("adhesion", 0.0),                      # ★입자-강체 들러붙음(그리퍼 그립·리프트, DexGarmentLab)
+            particle_adhesion_scale=params.get("adhesion_scale", 1.0), # 입자간 들러붙음(폴드 안정)
+            particle_friction_scale=params.get("friction_scale", 1.0),# ★입자간 마찰(폴드 유지·내부 안정, DexGarmentLab 0.5)
+            adhesion_offset_scale=params.get("adhesion_offset_scale", 0.0),  # adhesion fall-off 거리(×rest offset)
+            gravity_scale=params.get("gravity_scale", 1.0),           # ★중력 명시(1.0=정상 중력). 입자는 시스템이 중력 적용
         )
     physicsUtils.add_physics_material_to_prim(stage, stage.GetPrimAtPath(psys_path), pmat_path)
 

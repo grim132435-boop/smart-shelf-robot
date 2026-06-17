@@ -23,9 +23,10 @@ SHOT_DIR = "/home/devuser/shelf_grasp_dev/logs/shots"
 MESH = "/home/devuser/shelf_grasp_dev/assets/snack_bag_pillow.usd"   # 코스 5mm(잘 부풂)
 PCO, SRO = 0.005, 0.0025
 REST_Z = 0.045
-# 격자: stretch(열) × bend(행) — 들리는 최소 stretch 찾기
-STRETCHES = [20000.0, 50000.0, 120000.0]
-BENDS = [150.0, 500.0]
+# 격자: stretch(열) × pressure(행) — 부피·불룩 튜닝(실측 7→9.5cm 불룩 +25mm, 안정, 들림)
+STRETCHES = [6000.0, 8000.0, 12000.0]
+PRESSURES = [9.0, 10.0, 11.0]
+FRICTION = 2.2   # 그립 미끄럼 방지(사용자 설정값)
 DX, DY = 0.45, 0.60
 X_OPEN, X_GRIP = 0.10, 0.045   # 4.3cm 침투
 GZ = 0.04
@@ -40,15 +41,15 @@ _fmat = PhysicsMaterial(prim_path="/World/Physics_Materials/finger_mat",
 bags = []   # (idx, gx, gy, P info)
 fingers = []  # (fingerL, fingerR, gx, gy)
 idx = 0
-for r, B in enumerate(BENDS):
-    gy = (r - 0.5) * DY
+for r, P in enumerate(PRESSURES):
+    gy = (r - 1) * DY
     for c, S in enumerate(STRETCHES):
         gx = (c - 1) * DX
         spawn_snack_bag(stage, scene_path, (gx, gy), REST_Z, mode="cloth",
                         prim_path=f"/World/bag_{idx}",
-                        params={"pressure": 12.0, "stretch": S, "bend": B, "shear": 50.0,
-                                "mesh_usd": MESH, "pco": PCO, "sro": SRO,
-                                "pbd_damping": 10.0, "max_velocity": 2.0})
+                        params={"pressure": P, "stretch": S, "bend": 150.0, "shear": 50.0,
+                                "friction": FRICTION, "mesh_usd": MESH, "pco": PCO, "sro": SRO,
+                                "pbd_damping": 14.0, "max_velocity": 1.0})
         def mk(name, x, y):
             f = DynamicCuboid(prim_path=f"/World/{name}", name=name,
                               position=np.array([x, y, GZ]), scale=np.array([0.02, 0.025, 0.025]),
@@ -58,10 +59,10 @@ for r, B in enumerate(BENDS):
             return f
         fL = mk(f"fL_{idx}", gx - X_OPEN, gy); fR = mk(f"fR_{idx}", gx + X_OPEN, gy)
         fingers.append((fL, fR, gx, gy))
-        bags.append((idx, S, B))
-        print(f"  bag_{idx} @({gx:+.2f},{gy:+.2f}) stretch={S} bend={B}", flush=True)
+        bags.append((idx, S, P))
+        print(f"  bag_{idx} @({gx:+.2f},{gy:+.2f}) stretch={S} pressure={P}", flush=True)
         idx += 1
-print(f"[SWEEPGRIP] {idx}개. 열=stretch{STRETCHES} 행=bend{BENDS}", flush=True)
+print(f"[SWEEPGRIP] {idx}개. 열=stretch{STRETCHES} 행=pressure{PRESSURES}", flush=True)
 
 def set_grip(x, z=GZ):
     for (fL, fR, gx, gy) in fingers:
@@ -121,7 +122,7 @@ while simulation_app.is_running():
         lz = [avgz(i) for i in range(idx)]
         lifted = [(None if (lz[i] is None or _infl_z[i] is None) else lz[i]-_infl_z[i]) for i in range(idx)]
         print(f"[SWEEPGRIP] 리프트 평균z(mm): {lz}", flush=True)
-        print(f"[SWEEPGRIP] ★들림량(mm, +클수록 잘들림): {lifted}  (열=stretch{STRETCHES} 행=bend{BENDS})", flush=True)
+        print(f"[SWEEPGRIP] ★들림량(mm, +클수록 잘들림): {lifted}  (열=stretch{STRETCHES} 행=pressure{PRESSURES})", flush=True)
         shot("sweepgrip")
         print("[SWEEPGRIP] 완료(sweepgrip.png). None=폭발. 종료 touch /tmp/snackbag_stop", flush=True)
     if os.path.exists(STOP):

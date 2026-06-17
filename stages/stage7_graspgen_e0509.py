@@ -1867,33 +1867,63 @@ def main():
         if args.obj_type == "snack":
             if not _snack_done and step > 80:
                 _bag_top = _table_top + 0.072
-                _bag_press = _table_top + 0.060   # ★윗면 puff만 살짝 물기(납작 크러시 금지 — 잡을 부피 유지) iter2
-                def _ee_top(tx, ty, tcp_z):   # top-down EE pose(그리퍼 아래로, TCP는 tcp_depth 아래)
+                _bag_mid = _table_top + 0.052     # ★윗 puff만 진입(바닥 납작 방지 — 두께 유지한 채 폭 스퀴즈) iter4
+                # ★옆-스퀴즈 EE: 그리퍼는 EE 로컬Y축으로 닫힘(실관찰) → 폭(16cm=world X) 압축하려면 로컬Y=world X.
+                #   approach(로컬Z)=아래. 닫으면 world X(폭 16) 좁아짐 → 두께 불룩→그립(실측 모델).
+                def _ee_side(tx, ty, tcp_z):
                     M = np.eye(4); M[:3,0]=[0,1,0]; M[:3,1]=[1,0,0]; M[:3,2]=[0,0,-1]
                     M[:3,3] = [tx, ty, tcp_z + RHP12_TCP_DEPTH]; return M
-                def _bag_meanz():   # particle cloth 점은 월드 좌표 → 평균z로 봉지 높이 추적
-                    _pp = UsdGeom.Mesh(stage.GetPrimAtPath("/World/snack_bag")).GetPointsAttr().Get()
-                    return sum(p[2] for p in _pp) / len(_pp)
-                _bz0 = _bag_meanz()   # 파지 전 기준 높이
-                print(f"[과자봉지] squish 파지 시작(부분개방→얕은누르기→느린닫기→리프트). 기준 평균z={_bz0*1000:.0f}mm", flush=True)
-                set_gripper(ctrl, robot_art, sim_js_names, my_world, 0.55, steps=25)   # 어느정도 벌림
+                def _bag_worldz():   # 봉지 월드 z(들림 판정). particle cloth는 월드바운드로 측정
+                    try:
+                        _bd = UsdGeom.Boundable(stage.GetPrimAtPath("/World/snack_bag"))
+                        _bb = _bd.ComputeWorldBound(Usd.TimeCode.Default(), UsdGeom.Tokens.default_).ComputeAlignedBox()
+                        return (_bb.GetMin()[2] + _bb.GetMax()[2]) / 2.0
+                    except Exception:
+                        return float("nan")
+                # 현재 관절상태로 cu_js 재시드(plan_single은 매 호출 현재상태 시드 필요 — 한 iteration서 연속 동작)
+                def _refresh_cujs():
+                    _jp = robot_art.get_joint_positions()
+                    _ap = np.array([float(_jp[sim_js_names.index(_jn)]) if _jn in sim_js_names else 0.0
+                                    for _jn in arm_joint_names], dtype=np.float32)
+                    _ap = np.clip(_ap, ARM_JOINT_LOWER + 1e-3, ARM_JOINT_UPPER - 1e-3)
+                    return JointState(
+                        position=tensor_args.to_device(_ap),
+                        velocity=tensor_args.to_device(np.zeros_like(_ap)),
+                        acceleration=tensor_args.to_device(np.zeros_like(_ap)),
+                        jerk=tensor_args.to_device(np.zeros_like(_ap)),
+                        joint_names=list(arm_joint_names))
+                # 접근/리프트: cuRobo plan_single(매끄러운 시간최적 궤적, IK분기 플립·되돌아감 없음). 실패시 direct IK 폴백.
+                def _plan_move(target_world, tag, arm_only=False):
+                    _js = _refresh_cujs()
+                    _r = motion_gen.plan_single(_js.unsqueeze(0),
+                                                mat4_to_curobo_pose(target_world, tensor_args), plan_config)
+                    if _r.success.item():
+                        execute_plan(motion_gen.get_full_js(_r.get_interpolated_plan()),
+                                     sim_js_names, robot_art, ctrl, my_world, extra_steps=1,
+                                     track_tag=tag, arm_only=arm_only)
+                        return True
+                    print(f"  [과자봉지] {tag} plan_single 실패 → direct IK 폴백", flush=True)
+                    return move_direct_ik(target_world, ik_solver, tensor_args, _js.position, arm_joint_names,
+                                          robot_art, ctrl, my_world, steps=70, settle=20)
+                _bz0 = _bag_worldz()
+                print(f"[과자봉지] 옆-스퀴즈 파지 시작(폭16→압축, 두께 불룩→그립). 기준 월드z={_bz0*1000:.0f}mm", flush=True)
+                set_gripper(ctrl, robot_art, sim_js_names, my_world, GRIP_OPEN, steps=25)   # 최대 개방(span~10.6cm)
                 save_shot("snack_01_open")
-                if move_direct_ik(_ee_top(_cx, _cy, _bag_top + 0.05), ik_solver, tensor_args,
-                                  cu_js.position, arm_joint_names, robot_art, ctrl, my_world, steps=60):
+                if _plan_move(_ee_side(_cx, _cy, _bag_top + 0.06), "above"):   # 접근(매끄럽게)
                     save_shot("snack_02_above")
-                    move_direct_ik(_ee_top(_cx, _cy, _bag_press), ik_solver, tensor_args,   # 얕은 누르기(윗면)
-                                   cu_js.position, arm_joint_names, robot_art, ctrl, my_world, steps=80, settle=40)
-                    save_shot("snack_03_press")
-                    set_gripper(ctrl, robot_art, sim_js_names, my_world, 0.95, steps=140)  # 느리고 부드럽게 핀치(풀크러시 직전)
-                    for _ in range(70): my_world.step(render=True)
+                    # 진입: 봉지에 일부러 접촉(plan_single은 충돌로 거부) → 직접 IK 유지
+                    move_direct_ik(_ee_side(_cx, _cy, _bag_mid), ik_solver, tensor_args,
+                                   _refresh_cujs().position, arm_joint_names, robot_art, ctrl, my_world, steps=90, settle=30)
+                    save_shot("snack_03_enter")
+                    set_gripper(ctrl, robot_art, sim_js_names, my_world, 0.40, steps=160)  # 폭 방향 옆-스퀴즈(느리게, 더 확실히 넥킹)
+                    for _ in range(80): my_world.step(render=True)
                     save_shot("snack_04_grip")
-                    move_direct_ik(_ee_top(_cx, _cy, _bag_top + 0.20), ik_solver, tensor_args,  # 리프트
-                                   cu_js.position, arm_joint_names, robot_art, ctrl, my_world, steps=60, settle=20)
+                    _plan_move(_ee_side(_cx, _cy, _bag_top + 0.22), "lift", arm_only=True)  # 리프트(매끄럽게 + 그리퍼 스퀴즈 유지)
                     save_shot("snack_05_lift")
-                    _bz1 = _bag_meanz()
-                    print(f"  [과자봉지] 리프트 후 평균z={_bz1*1000:.0f}mm (기준 {_bz0*1000:.0f}mm, Δ={(_bz1-_bz0)*1000:+.0f}mm). "
-                          f"{'들림✅' if _bz1-_bz0 > 0.03 else '안들림/폭발❌'}", flush=True)
-                    print("[과자봉지] squish 파지 완료. HALT.", flush=True)
+                    _bz1 = _bag_worldz()
+                    print(f"  [과자봉지] 리프트 후 월드z={_bz1*1000:.0f}mm (기준 {_bz0*1000:.0f}mm, Δ={(_bz1-_bz0)*1000:+.0f}mm). "
+                          f"{'들림✅' if _bz1-_bz0 > 0.03 else '안들림/폭발❌(이미지확인)'}", flush=True)
+                    print("[과자봉지] 옆-스퀴즈 파지 완료. HALT.", flush=True)
                 else:
                     print("[과자봉지] 접근 IK 실패", flush=True)
                 _snack_done = True
