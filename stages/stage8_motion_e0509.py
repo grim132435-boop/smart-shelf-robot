@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# ⚠️ [스테일·참조용] Stage8 '모놀리식 케이스'. 정본·최신은 stages/pipeline/stage8_main.py(모듈본, run_stage8.sh가 실행).
+#    이 파일엔 2026-06-18 모션 수정(standoff0.15·-y이탈·2층파지·클리어리프트·낮은파지) 미반영. 편집·실행하지 말 것.
 # Stage7: Stage5(추종 정밀화·다물체) + Stage6(그리퍼 정밀화) 병합본 — 2026-06-12. 도메인 랜덤화 베이스.
 """
 Stage 7: E0509 + RH-P12-RN GraspGen→cuRobo 다물체 픽앤플레이스 (Isaac Sim GUI) — 통합 베이스
@@ -73,12 +75,6 @@ simulation_app = SimulationApp({
     "width": "1920",
     "height": "1080",
 })
-
-# Physics Inspector 창(Tools>Physics>Physics Inspector) — 로봇 관절자세 수동 확인/조작용.
-#   메뉴 액션 show_physics_inspector는 omni.physx.supportui가 제공(이게 없으면 "Could not find action" 에러).
-from omni.isaac.core.utils.extensions import enable_extension
-for _ext in ("omni.physx.supportui", "omni.physx.inspector"):
-    enable_extension(_ext)
 
 import sys, os, time
 import numpy as np
@@ -200,8 +196,7 @@ STOP_FILE = "/tmp/stage7_stop"
 SHOT_DIR  = "/home/devuser/shelf_grasp_dev/logs/shots"
 
 # ── GraspGen 파라미터 (stage3에서 이식) ──────────────────────────────────────
-PREGRASP_STANDOFF    = 0.10        # pre-grasp 후퇴 거리(m). 0.15→0.10: 책상 앞모서리 회피
-RENDER_EVERY         = 3           # [런타임 단축] 모션/대기 중 N스텝당 1회만 렌더(물리는 매 스텝). 캡처직전·마지막 스텝은 렌더.
+PREGRASP_STANDOFF    = 0.04        # pre-grasp 후퇴 거리(m). 0.10→0.04: 파지점 z접근 최소화(거의 직행, 사용자). 0은 물체접촉이라 불가
 APPROACH_Z_MAX       = -0.90       # top 파지 수직도 임계(월드 Z성분, -1=완전수직)
 APPROACH_Z_MAX_RELAX = -0.80       # fallback 완화 임계
 SIDE_APPROACH_Z_MAX  = 0.85        # side 후보 채택 임계(approach z 절대값). 스냅이 수평 보장하므로
@@ -1117,16 +1112,14 @@ def execute_plan(cmd, sim_js_names, robot, ctrl, my_world, extra_steps=1, track_
             common.append(x)
     cmd_ord = cmd.get_ordered_joint_state(common)
     clr_min = None                             # [간격로깅] 세그먼트 최소간격 누적
-    _nlast = len(cmd_ord.position) - 1
     for i in range(len(cmd_ord.position)):
         ctrl.apply_action(ArticulationAction(
             cmd_ord.position[i].cpu().numpy(),
             cmd_ord.velocity[i].cpu().numpy(),
             joint_indices=idx_list,
         ))
-        _rnd = (i % RENDER_EVERY == 0) or (i == _nlast)   # [런타임] 렌더 솎기(마지막은 캡처 위해 렌더)
         for _ in range(extra_steps):
-            my_world.step(render=_rnd)
+            my_world.step(render=True)
         clr_min = _clr_probe(clr_min)
         if viz is not None and i % 10 == 0:    # 동작 중 충돌구체 실시간 갱신(팔 따라감)
             viz()
@@ -1367,11 +1360,10 @@ def move_linear_ik(start_world, target_world, ik_solver, tensor_args, cu_js_pos,
             print(f"  [moveL{(' ' + tag) if tag else ''}] 웨이포인트 {i}/{waypoints} IK 실패 → 중단", flush=True)
             return False
         q_tgt = ikr.solution.view(-1)[:nA].cpu().numpy().astype(np.float32)
-        _rnd = (i % RENDER_EVERY == 0) or (i == waypoints)   # [런타임] 렌더 솎기(마지막 웨이포인트는 렌더)
         for s in range(1, substeps + 1):          # 드라이브 추종용 미세 보간
             q = ((1.0 - s / substeps) * q_prev + (s / substeps) * q_tgt).astype(np.float32)
             ctrl.apply_action(ArticulationAction(q, joint_indices=arm_idx))
-            my_world.step(render=(_rnd and s == substeps))
+            my_world.step(render=True)
         q_prev = q_tgt
         seed   = ikr.solution.view(1, 1, -1)      # 다음 IK는 현 해로 시드 → 관절 연속성
         clr_min = _clr_probe(clr_min)
@@ -1520,18 +1512,7 @@ def main():
         _yl, _yr = _yc - 0.12, _yc + 0.12      # 좌우 두 열
         def _yaw_quat(_deg):
             _r = np.radians(_deg); return np.array([np.cos(_r / 2), 0.0, 0.0, np.sin(_r / 2)])
-        def _pose_quat_z(_spec, _lie, _yaw):
-            # 눕힘: 90°(x축) 회전 + yaw(z) → 축이 수평, 안착높이=반경. 직립: yaw만(z), 안착=half.
-            if _lie:
-                _Rl = Rotation.from_euler('z', _yaw, degrees=True) * Rotation.from_euler('x', 90, degrees=True)
-                _ql = _Rl.as_quat()   # xyzw
-                return np.array([_ql[3], _ql[0], _ql[1], _ql[2]]), _table_top + _spec["radius"] + 0.002
-            return _yaw_quat(_yaw), _table_top + _spec["height"] / 2 + 0.002
-        def _apply_roll_damp(_path):   # 누운 실린더 구름 방지(robotis_lab 참고)
-            from pxr import PhysxSchema as _PxS
-            _rb = _PxS.PhysxRigidBodyAPI.Apply(stage.GetPrimAtPath(_path))
-            _rb.CreateAngularDampingAttr().Set(50.0); _rb.CreateLinearDampingAttr().Set(5.0)
-        def _spawn_bottle_prim(_path, _xy, _q, _z, _lie):
+        def _spawn_bottle_prim(_path, _xy, _yaw):
             _bm = make_bottle_mesh(_btlspec["radius"], _btlspec["height"])
             _mp = UsdGeom.Mesh.Define(stage, _path)
             _mp.CreatePointsAttr([Gf.Vec3f(*map(float, v)) for v in _bm.vertices])
@@ -1539,66 +1520,39 @@ def main():
             _mp.CreateFaceVertexIndicesAttr([int(i) for f in _bm.faces for i in f])
             _mp.CreateDisplayColorAttr([Gf.Vec3f(0.10, 0.45, 0.95)])
             _bp = _mp.GetPrim()
+            _q = _yaw_quat(_yaw); _czb = _table_top + _btlspec["height"] / 2 + 0.002
             _xf2 = UsdGeom.Xformable(_bp)
-            _xf2.AddTranslateOp().Set(Gf.Vec3d(float(_xy[0]), float(_xy[1]), float(_z)))
+            _xf2.AddTranslateOp().Set(Gf.Vec3d(float(_xy[0]), float(_xy[1]), float(_czb)))
             _xf2.AddOrientOp().Set(Gf.Quatf(float(_q[0]), float(_q[1]), float(_q[2]), float(_q[3])))
             UsdPhysics.RigidBodyAPI.Apply(_bp)
             UsdPhysics.CollisionAPI.Apply(_bp)
             UsdPhysics.MeshCollisionAPI.Apply(_bp).CreateApproximationAttr().Set("convexHull")
             UsdPhysics.MassAPI.Apply(_bp).CreateMassAttr().Set(0.60)
-            if _lie:
-                _apply_roll_damp(_path)
             return _RigidPrim(_path, name=_path.split("/")[-1])
-        # 캔2 + 병2. (type, (x,y), 눕힘?, yaw). --dr이면 위치·자세(서/눕·눕힘yaw) 매 실행 랜더마이즈.
-        if args.dr:
-            # [Stage7 DR] 4코너에 캔2·병2를 무작위 배정 + 위치 지터 + 서/눕 + 눕힘yaw 랜덤(타입→층 라우팅은 유지).
-            #   ★코너·지터를 도달창 안으로 제한(전후 forward≈0.52/0.64, 지터 후도 ≤0.67). 밖이면 unreachable 스킵됨.
-            _xn_dr, _xf_dr = _cx + 0.02, _cx + 0.14
-            _corners = [(_xn_dr, _yl), (_xn_dr, _yr), (_xf_dr, _yl), (_xf_dr, _yr)]
-            _types4  = ["cylinder", "cylinder", "bottle", "bottle"]
-            _perm = np.random.permutation(4)
-            _layout = []
-            for _k, _ti in enumerate(_perm):
-                _cx0, _cy0 = _corners[_k]
-                _jx = float(np.clip(_cx0 + np.random.uniform(-0.025, 0.025), _cx - 0.02, _cx + 0.16))
-                _jy = float(_cy0 + np.random.uniform(-0.04, 0.04))
-                _lie = bool(np.random.random() < 0.5)
-                _yaw = float(np.random.uniform(-90.0, 90.0)) if _lie else 0.0
-                _layout.append((_types4[int(_ti)], (_jx, _jy), _lie, _yaw))
-            print("[혼합+DR] 4개 위치·자세(서/눕·눕힘yaw) 랜더마이즈", flush=True)
-        else:
-            # 고정: 캔(서/눕0°) + 병(서/눕45°)
-            _layout = [
-                ("cylinder", (_xn, _yl), False,  0.0),   # 캔 직립
-                ("cylinder", (_xn, _yr), True,   0.0),   # 캔 눕힘 0°
-                ("bottle",   (_xf, _yl), False,  0.0),   # 병 직립
-                ("bottle",   (_xf, _yr), True,  45.0),   # 병 눕힘 45°
-            ]
-        for _ci, (_ty, _xy, _lie, _yaw) in enumerate(_layout):
+        # 사각형 코너(캔·병 대각 교차=체커보드) + yaw 다양화
+        _layout = [("cylinder", (_xn, _yl),  0.0), ("bottle", (_xn, _yr), 30.0),
+                   ("bottle",   (_xf, _yl), 60.0), ("cylinder", (_xf, _yr), 90.0)]
+        for _ci, (_ty, _xy, _yaw) in enumerate(_layout):
             _path = f"/World/obj_{_ty}_{_ci}"
-            _spec = _canspec if _ty == "cylinder" else _btlspec
-            _q, _z = _pose_quat_z(_spec, _lie, _yaw)
             if _ty == "cylinder":
+                _czc = _table_top + _canspec["height"] / 2 + 0.002
                 _ob = _cyl.DynamicCylinder(prim_path=_path, name=f"obj_{_ci}",
-                    position=np.array([_xy[0], _xy[1], _z]), orientation=_q,
+                    position=np.array([_xy[0], _xy[1], _czc]), orientation=_yaw_quat(_yaw),
                     radius=_canspec["radius"], height=_canspec["height"],
                     color=np.array([0.85, 0.1, 0.1]), mass=0.30)
-                if _lie:
-                    _apply_roll_damp(_path)
-                _lvl, _frac = 2, 0.18
+                _spec, _lvl, _frac = _canspec, 2, 0.18
             else:
-                _ob = _spawn_bottle_prim(_path, _xy, _q, _z, _lie)
-                _lvl, _frac = 3, 0.0
+                _ob = _spawn_bottle_prim(_path, _xy, _yaw)
+                _spec, _lvl, _frac = _btlspec, 3, 0.0
             targets.append({"obj": _ob, "path": _path, "status": "pending", "reason": None,
                             "type": _ty, "level": _lvl, "spec": _spec, "frac": _frac})
-            print(f"[혼합] {_path}: {_ty} {('눕힘 %.0f°' % _yaw) if _lie else '직립'} → {_lvl}층 "
-                  f"@[{_xy[0]:.2f},{_xy[1]:.2f}]", flush=True)
         # 층별 슬롯(2개씩)·점유(활성화 시 층별 전환·누적). 검증된 다물체 슬롯 2곳 사용.
         _MIX_LSLOTS = {2: [(0.165, 0.56), (0.34, 0.44)], 3: [(0.165, 0.56), (0.34, 0.44)]}
         _MIX_LUSED  = {2: [False, False], 3: [False, False]}
         target_cube = targets[0]["obj"]
         args.objects = len(targets)   # 다물체 분기(타겟 순회·적치) 활성화
-        print(f"[혼합] 캔(서/눕0°) + 병(서/눕45°) 4개 → 캔 2층 / 병 3층", flush=True)
+        print(f"[혼합] 4개 2×2 사각형: 캔2→2층, 병2→3층 "
+              f"(코너 x={_xn:.2f}/{_xf:.2f}, y={_yl:.2f}/{_yr:.2f})", flush=True)
     elif _obj_type in ("cylinder", "bottle") and args.objects > 1:
         # ── Phase3 다물체: 픽 대상 캔 N개를 y줄로 스폰(전부 동적=전부 픽 대상) ──
         from omni.isaac.core.objects import cylinder as _cyl
@@ -1687,16 +1641,13 @@ def main():
         #   가장자리0 2cm 베개를 공기로 부풀림 → 차분·깔끔. 강체 파이프라인 우회(snack 전용 핸들러).
         import sys as _sys
         _sys.path.insert(0, "/home/devuser/shelf_grasp_dev/snack_bag")
-        from snack_bag_module import spawn_snack_bag as _spawn_snack, add_snack_stand as _add_stand
+        from snack_bag_module import spawn_snack_bag as _spawn_snack
         _scn0 = next((p for p in stage.Traverse() if p.IsA(UsdPhysics.Scene)), None)
         _scn_path = str(_scn0.GetPath()) if _scn0 else "/physicsScene"
         _spawn_snack(stage, _scn_path, (_cx, _cy), _table_top + 0.04, mode="cloth")
-        # 과자봉지 거치대(삼각 프리즘, 16.4×14×12.7cm) — 3층 오른쪽(왼쪽엔 페트병). ★_STAND_X로 좌우 조정
-        _STAND_X, _STAND_Y = 0.310, 0.530   # 사용자 jog 자세: place EE y=0.470 + stand 앞 오프셋 0.06
-        _add_stand(stage, "/World/snack_stand", (_STAND_X, _STAND_Y), SHELF3_FLOOR_TOP, width=0.12)
         target_cube = None
         targets = []
-        print(f"[과자봉지] cloth 봉지 spawn @[{_cx:.2f},{_cy:.2f}] + 거치대 @[{_STAND_X:.2f},{_STAND_Y:.2f}] (3층) — snack 핸들러", flush=True)
+        print(f"[과자봉지] cloth 봉지 spawn @[{_cx:.2f},{_cy:.2f}] (가장자리0 베개, 공기 부풀림) — snack 핸들러", flush=True)
     else:
         target_cube = cuboid.DynamicCuboid(
             prim_path="/World/target_cube", name="target_cube",
@@ -1848,7 +1799,7 @@ def main():
     plan_config = MotionGenPlanConfig(
         enable_graph=False, enable_graph_attempt=4,
         max_attempts=8, enable_finetune_trajopt=True,
-        time_dilation_factor=0.85,   # 0.7→0.85: 실행 속도↑(런타임 단축, 추종은 중력보상으로 유지)
+        time_dilation_factor=0.7,
     )
     # ★Phase2.5: 파지는 plan_grasp(2단계: offset까지 풀충돌인지 → 직선 최종진입+손가락 충돌면제)가
     #   접근 제약을 내장하므로 별도 접근 메트릭 불필요(plan_grasp는 pose_cost_metric=None을 요구).
@@ -1878,6 +1829,7 @@ def main():
     cycle        = 0
     attached     = False
     attach_off   = None
+    _direct_place = False   # [효율] PLAN_CARRY가 안착까지 직접 plan_single 성공 시 True → LOWER moveL 생략
     cube_tgt_pos = None
     fail_cnt     = 0
     MAX_FAIL     = 5   # 무한 재시도 방지: 이 횟수 초과 시 진단 후 다음 사이클로
@@ -2014,22 +1966,14 @@ def main():
             continue   # 테스트 후 장면 유지(HALT) — 파지 파이프라인 진입 안 함
 
         # 월드 동기화 ([Phase3] 현재 타겟만 ignore — 이웃/기적치 캔은 자동 장애물)
-        if step == 50 or step % 1000 == 0:
-            # ★snack도 매대·거치대를 cuRobo에 등록해야 carry가 매대를 회피(미등록 시 직선경로로 매대 관통=박음).
-            #   단 봉지(cloth 메시)·파티클시스템은 ignore — 안 빼면 cuRobo가 자기 봉지와 충돌 판정→정지.
-            if args.obj_type == "snack":
-                _ig = [robot_prim_path, "/World/snack_bag", "snackParticleSystem",
-                       "/World/defaultGroundPlane", "/curobo", "/World/cspheres",
-                       ROBOT_BASE_BLOCK_PATH]
-            else:
-                _ig = [robot_prim_path, targets[cur_tgt_i]["path"],
-                       "/World/defaultGroundPlane", "/curobo",
-                       "/World/cspheres",   # ★시각화 구체는 장애물 아님(안 빼면 로봇이 자기 구체와 충돌→정지)
-                       ROBOT_BASE_BLOCK_PATH]   # 책상 충돌 복구(팔이 책상 회피)
+        if args.obj_type != "snack" and (step == 50 or step % 1000 == 0):
             obs = usd_help.get_obstacles_from_stage(
                 only_paths=["/World"],
                 reference_prim_path=robot_prim_path,
-                ignore_substring=_ig,
+                ignore_substring=[robot_prim_path, targets[cur_tgt_i]["path"],
+                                   "/World/defaultGroundPlane", "/curobo",
+                                   "/World/cspheres",   # ★시각화 구체는 장애물 아님(안 빼면 로봇이 자기 구체와 충돌→정지)
+                                   ROBOT_BASE_BLOCK_PATH],   # 책상 충돌 복구(팔이 책상 회피)
             ).get_collision_check_world()
             motion_gen.update_world(obs)
             if step == 50:   # cuRobo가 든 장애물(책상/매대) 확인 — base 프레임 z 범위
@@ -2121,22 +2065,14 @@ def main():
                     return move_direct_ik(target_world, ik_solver, tensor_args, _js.position, arm_joint_names,
                                           robot_art, ctrl, my_world, steps=70, settle=20)
                 _bz0 = _bag_worldz()
-                def _bag_span(_axis):   # 봉지 월드 바운드 폭(0=X 그립방향, 2=Z 두께) — 그리퍼 span(11cm) 매칭용
-                    try:
-                        _bd = UsdGeom.Boundable(stage.GetPrimAtPath("/World/snack_bag"))
-                        _bb = _bd.ComputeWorldBound(Usd.TimeCode.Default(), UsdGeom.Tokens.default_).ComputeAlignedBox()
-                        return _bb.GetMax()[_axis] - _bb.GetMin()[_axis]
-                    except Exception:
-                        return float("nan")
-                print(f"[과자봉지] 옆-스퀴즈 파지 시작. 봉지 그립폭(X)={_bag_span(0)*1000:.0f}mm 두께(Z)={_bag_span(2)*1000:.0f}mm "
-                      f"(그리퍼 span 11cm에 맞추는 게 목표). 기준 월드z={_bz0*1000:.0f}mm", flush=True)
+                print(f"[과자봉지] 옆-스퀴즈 파지 시작(폭16→압축, 두께 불룩→그립). 기준 월드z={_bz0*1000:.0f}mm", flush=True)
                 set_gripper(ctrl, robot_art, sim_js_names, my_world, GRIP_OPEN, steps=25)   # 최대 개방(span~10.6cm)
                 save_shot("snack_01_open")
                 if _plan_move(_ee_side(_cx, _cy, _bag_top + 0.06), "above"):   # 접근(매끄럽게)
                     save_shot("snack_02_above")
                     # 진입: 봉지에 일부러 접촉(plan_single은 충돌로 거부) → 직접 IK 유지
                     move_direct_ik(_ee_side(_cx, _cy, _bag_mid), ik_solver, tensor_args,
-                                   _refresh_cujs().position, arm_joint_names, robot_art, ctrl, my_world, steps=40, settle=20)  # 하강 1.5배 빠르게(60→40, 사용자) iter11
+                                   _refresh_cujs().position, arm_joint_names, robot_art, ctrl, my_world, steps=200, settle=40)  # 느린 진입(빠른 깊은침투 폭발 방지) iter5
                     save_shot("snack_03_enter")
                     # ★스퀴즈 = 실측 4.3cm 침투까지 폐루프로 닫음(고정 각도 추측 금지). 봉지 반폭0.08 → 반간격0.037 → 손가락간격 74mm
                     def _finger_gap():
@@ -2144,140 +2080,22 @@ def main():
                             _m = UsdGeom.Xformable(stage.GetPrimAtPath(f"/World/Robot/{_n}")).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
                             return _m.ExtractTranslation()[0]
                         return abs(_fx("gripper_rh_p12_rn_r2") - _fx("gripper_rh_p12_rn_l2"))
-                    _TARGET_GAP = 0.074   # ★실측 4.3cm 침투(16cm봉지 → 74mm) — 실제 봉지처럼 변형 보이게(카테리-보조라 홀딩 불요) iter9
+                    _TARGET_GAP = 0.074   # 실측: 2cm 손가락이 양옆 4.3cm 침투(16cm폭 → 7.4cm 간격)
                     _ang = GRIP_OPEN
-                    while _ang < 0.85:   # 캡 상향
-                        _ang += 0.14
-                        set_gripper(ctrl, robot_art, sim_js_names, my_world, _ang, steps=8)  # 그립 더 빠르게(증분0.08→0.14·8스텝, 사용자) iter12
+                    while _ang < 0.60:
+                        _ang += 0.03
+                        set_gripper(ctrl, robot_art, sim_js_names, my_world, _ang, steps=12)  # 느리게 닫으며 측정
                         if _finger_gap() <= _TARGET_GAP:
                             break
-                    print(f"  [과자봉지] 스퀴즈 정지 — 손가락간격={_finger_gap()*1000:.0f}mm (목표 {_TARGET_GAP*1000:.0f}mm) 각도={_ang:.2f}", flush=True)
+                    print(f"  [과자봉지] 스퀴즈 정지 — 손가락간격={_finger_gap()*1000:.0f}mm (목표 74mm=4.3cm침투) 각도={_ang:.2f}", flush=True)
                     for _ in range(80): my_world.step(render=True)
                     save_shot("snack_04_grip")
-                    # ★시각 캐리-보조(검증된 snack32 방식): 파티클 시스템 정지 → 봉지 강체 추종 운반 → 매대서 재활성 안착 iter10
-                    from pxr import Gf as _Gf, PhysxSchema as _PXS
-                    try:
-                        _PXS.PhysxParticleSystem(stage.GetPrimAtPath("/World/snackParticleSystem")).CreateParticleSystemEnabledAttr().Set(False)
-                    except Exception as _e:
-                        print(f"  [과자봉지] 파티클시스템 정지 실패: {_e}", flush=True)
-                    # ★완전 강체 추종(위치+회전). ★점이 "로컬"이라 월드로 변환 + 메시 Xform identity화(점=월드 통일) 후 EE 로컬프레임에 고정
-                    _bagx = UsdGeom.Xformable(stage.GetPrimAtPath("/World/snack_bag"))
-                    _Mbag = _bagx.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-                    _W0 = [_Mbag.Transform(_Gf.Vec3d(p[0], p[1], p[2]))
-                           for p in UsdGeom.Mesh(stage.GetPrimAtPath("/World/snack_bag")).GetPointsAttr().Get()]
-                    _bagx.ClearXformOpOrder()   # 메시 Xform identity → 점=월드
-                    UsdGeom.Mesh(stage.GetPrimAtPath("/World/snack_bag")).GetPointsAttr().Set([_Gf.Vec3f(_w) for _w in _W0])
-                    _M0inv = UsdGeom.Xformable(stage.GetPrimAtPath(ee_prim_path)).ComputeLocalToWorldTransform(Usd.TimeCode.Default()).GetInverse()
-                    _Plocal = [_M0inv.Transform(_w) for _w in _W0]   # EE 로컬프레임 점(그립 시점 고정)
-                    import numpy as _np, math as _math
-                    def _snack_follow(dt):
-                        _M = UsdGeom.Xformable(stage.GetPrimAtPath(ee_prim_path)).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-                        UsdGeom.Mesh(stage.GetPrimAtPath("/World/snack_bag")).GetPointsAttr().Set(
-                            [_Gf.Vec3f(_M.Transform(_pl)) for _pl in _Plocal])
-                    my_world.add_physics_callback("snack_follow", _snack_follow)
-                    # 리프트(봉지 추종) — 낮게+빠르게(매대 통과 방지·속도)
-                    move_direct_ik(_ee_side(_cx, _cy, _bag_top + 0.10), ik_solver, tensor_args,
-                                   _refresh_cujs().position, arm_joint_names, robot_art, ctrl, my_world, steps=80, settle=8)
+                    _plan_move(_ee_side(_cx, _cy, _bag_top + 0.22), "lift", arm_only=True)  # 리프트(매끄럽게 + 그리퍼 스퀴즈 유지)
                     save_shot("snack_05_lift")
-                    # 매대 3층 운반+적치. ★봉지를 거치대 빗변과 평행히 기울인(tilt) 자세로 매대 '앞'까지 간 뒤
-                    #   그 자세 유지하며 +y로 moveL 진입(사용자 방식). 마지막만 비트는 폐기방식과 달리 진입 시작부터
-                    #   일관 tilt라 추종오차 폭증·매대 통과를 피한다.
-                    _PRE  = [0.310, 0.230, 1.350]   # 사용자 jog: 매대 앞 자세
-                    _PLCE = [0.310, 0.470, 1.350]   # 사용자 jog: 적치 자세
-                    _TILT_DEG = -37.427   # 베이스 x축 둘레(거치대 빗변 37.4°에 평행)
-                    def _tilt_pose(_xyz):
-                        _b = side_grasp_from_approach(SHELF3_APPROACH, _xyz, RHP12_TCP_DEPTH)
-                        _th = _math.radians(_TILT_DEG); _c, _s = _math.cos(_th), _math.sin(_th)
-                        _b[:3, :3] = _np.array([[1., 0, 0], [0, _c, -_s], [0, _s, _c]]) @ _b[:3, :3]
-                        return _b
-                    # ① 매대 앞 포인트로 cuRobo 충돌회피 이동(tilt 없는 표준 자세 — tilt 포함 시 plan_single IK 분기 실패)
-                    _plan_move(side_grasp_from_approach(SHELF3_APPROACH, _PRE, RHP12_TCP_DEPTH), "carry_above", arm_only=True)
-                    # ② PRE 위치에서 제자리 reorientation(tilt만 적용, 위치 동일) — 짧은 direct IK
-                    move_direct_ik(_tilt_pose(_PRE),
-                                   ik_solver, tensor_args, _refresh_cujs().position, arm_joint_names, robot_art, ctrl, my_world, steps=40, settle=5)
-                    # ③ tilt 자세 유지하며 +y moveL 진입(사용자 jog place)
-                    move_direct_ik(_tilt_pose(_PLCE),
-                                   ik_solver, tensor_args, _refresh_cujs().position, arm_joint_names, robot_art, ctrl, my_world, steps=120, settle=10)
-                    save_shot("snack_06_placed")
-                    # 해제: 추종 콜백 제거 + 그리퍼 개방
-                    try:
-                        my_world.remove_physics_callback("snack_follow")
-                    except Exception:
-                        pass
-                    set_gripper(ctrl, robot_art, sim_js_names, my_world, GRIP_OPEN, steps=40)
-                    # ★물성 복귀: 파티클 시스템 재활성(snack32 검증 — 봉지 cloth로 매대 안착)
-                    try:
-                        _PXS.PhysxParticleSystem(stage.GetPrimAtPath("/World/snackParticleSystem")).CreateParticleSystemEnabledAttr().Set(True)
-                    except Exception as _e:
-                        print(f"  [과자봉지] 파티클시스템 복귀 실패: {_e}", flush=True)
-                    for _ in range(30):
-                        my_world.step(render=True)
-                    # ★후퇴 = 표준 자세로 PRE 위치 후퇴(tilt 상태에서 급변 방지)
-                    move_direct_ik(side_grasp_from_approach(SHELF3_APPROACH, _PRE, RHP12_TCP_DEPTH),
-                                   ik_solver, tensor_args, _refresh_cujs().position, arm_joint_names, robot_art, ctrl, my_world, steps=100, settle=10)
-                    save_shot("snack_07_retract")
-                    for _ in range(50):
-                        my_world.step(render=True)
-                    save_shot("snack_08_settled")
-                    print("[과자봉지] 매대 3층 적치 완료(시각 캐리-보조 + 물성 복귀 + 후퇴). HALT.", flush=True)
-                    # ── XYZ jog 루프: /tmp/snack_jog.txt 에 "x y z [label]" 쓰면 IK 이동 + 관절각 저장 ──
-                    #   snack_jog.py 로 별도 터미널에서 입력. /tmp/snack_jog_stop 생성 시 루프 종료.
-                    import json as _json
-                    _JOG_FILE   = "/tmp/snack_jog.txt"
-                    _JOG_STOP   = "/tmp/snack_jog_stop"
-                    _JOG_SAVED  = "/tmp/snack_pose_saved.json"
-                    _jog_saved  = {}
-                    _jog_mtime  = 0.0
-                    if os.path.exists(_JOG_FILE):   os.remove(_JOG_FILE)
-                    if os.path.exists(_JOG_STOP):   os.remove(_JOG_STOP)
-                    print(f"[JOG] 시작. snack_jog.py 로 XYZ 입력. 종료: touch {_JOG_STOP}", flush=True)
-                    while not os.path.exists(_JOG_STOP):
-                        my_world.step(render=True)
-                        if not os.path.exists(_JOG_FILE):
-                            continue
-                        try:
-                            _mt = os.path.getmtime(_JOG_FILE)
-                        except OSError:
-                            continue
-                        if _mt <= _jog_mtime:
-                            continue
-                        _jog_mtime = _mt
-                        try:
-                            _line = open(_JOG_FILE).read().strip()
-                            _parts = _line.split()
-                            _tx, _ty, _tz = float(_parts[0]), float(_parts[1]), float(_parts[2])
-                            _label = _parts[3] if len(_parts) > 3 else "pose"
-                        except Exception as _e:
-                            print(f"[JOG] 파싱 실패: {_e} ({_JOG_FILE})", flush=True)
-                            continue
-                        # side_grasp_from_approach 자세로 IK
-                        _jog_T = side_grasp_from_approach(SHELF3_APPROACH, [_tx, _ty, _tz], RHP12_TCP_DEPTH)
-                        if _jog_T is None:
-                            print(f"[JOG] approach 벡터 오류", flush=True)
-                            continue
-                        _jog_ikr = ik_solver.solve_single(
-                            mat4_to_curobo_pose(_jog_T, tensor_args),
-                            _refresh_cujs().position.view(1, -1),
-                            _refresh_cujs().position.view(1, 1, -1),
-                        )
-                        if not _jog_ikr.success.item():
-                            print(f"[JOG] IK 실패: ({_tx:.3f},{_ty:.3f},{_tz:.3f})", flush=True)
-                            continue
-                        _q = _jog_ikr.solution.view(-1)[:len(arm_joint_names)].cpu().numpy()
-                        _arm_idx = [robot_art.get_dof_index(n) for n in arm_joint_names]
-                        _pos_cmd = robot_art.get_joint_positions().copy()
-                        for _i, _ai in enumerate(_arm_idx):
-                            _pos_cmd[_ai] = float(_q[_i])
-                        ctrl.apply_action(ArticulationAction(joint_positions=_pos_cmd))
-                        for _ in range(20):
-                            my_world.step(render=True)
-                        _q_deg = [round(float(np.degrees(_q[i])), 2) for i in range(len(arm_joint_names))]
-                        _jog_saved[_label] = {"xyz": [_tx, _ty, _tz], "joints_deg": dict(zip(arm_joint_names, _q_deg))}
-                        with open(_JOG_SAVED, "w") as _f:
-                            _json.dump(_jog_saved, _f, indent=2, ensure_ascii=False)
-                        print(f"[JOG] '{_label}' → ({_tx:.3f},{_ty:.3f},{_tz:.3f}) 이동. 관절(°)={_q_deg}. 저장: {_JOG_SAVED}", flush=True)
-                    print(f"[JOG] 종료. 저장된 자세: {list(_jog_saved.keys())}", flush=True)
-                    # ── jog 루프 끝 ──
+                    _bz1 = _bag_worldz()
+                    print(f"  [과자봉지] 리프트 후 월드z={_bz1*1000:.0f}mm (기준 {_bz0*1000:.0f}mm, Δ={(_bz1-_bz0)*1000:+.0f}mm). "
+                          f"{'들림✅' if _bz1-_bz0 > 0.03 else '안들림/폭발❌(이미지확인)'}", flush=True)
+                    print("[과자봉지] 옆-스퀴즈 파지 완료. HALT.", flush=True)
                 else:
                     print("[과자봉지] 접근 IK 실패", flush=True)
                 _snack_done = True
@@ -2373,8 +2191,8 @@ def main():
                               f"({targets[cur_tgt_i]['path']}, 바깥쪽 우선 y={_tp[1]:+.2f} x={_tp[0]:.2f}) 시작", flush=True)
                     # 캔 안정화 대기 (재배치 후 떨어지며 흔들림/기울어짐 → 멈출 때까지).
                     #   안 기다리면 grasp 계산 위치와 실제가 어긋나 그리퍼가 캔 놓침(캔-EE≫TCP).
-                    for _si in range(180):
-                        my_world.step(render=(_si % 6 == 0))   # [런타임] 안정화 대기는 렌더 드물게(물리는 매 스텝)
+                    for _ in range(180):
+                        my_world.step(render=True)
                         try:
                             if np.linalg.norm(target_cube.get_linear_velocity()) < 0.004:
                                 break
@@ -2481,22 +2299,14 @@ def main():
                     # 누운 캔: GraspGen/side선택 대신 캔축 기준 위에서 파지 합성(X=캔축 → carry가 직립화).
                     #   ★그리퍼는 캔축 ±180° 대칭(손가락 교체) → +축/−축 두 후보를 다 주고 plan_grasp이
                     #     손목 덜 트는 쪽 선택(불필요한 j6 180° 플립 방지). 직립 결과는 둘 다 동일.
-                    _can_axis = obj_R @ np.array([0.0, 0.0, 1.0])   # 물체 로컬 +z(월드). 병은 이게 캡 방향.
-                    if obj_type == "bottle":
-                        # ★병은 위아래(캡) 있음 → 재배향 후 캡이 위로 가야 함. 그리퍼 X축(=재배향 후 위축=카메라축)을
-                        #   캡(+_can_axis)에 맞추는 +캡 후보만 채택 → 적치 시 캡-위 + 카메라-위 동시 보장(joint_6 롤이 이 정렬).
-                        grasp_cands = [g for g in (lying_grasp_from_axis(+_can_axis, cube_tgt_pos, RHP12_TCP_DEPTH),)
-                                       if g is not None]
-                        print(f"  [누운픽] 병 캡 방향={_can_axis.round(2)} → +캡 후보만(재배향 시 캡-위·카메라-위)", flush=True)
-                    else:
-                        # 캔(대칭): ±축 모두 주고 plan_grasp이 손목 최소 선택
-                        grasp_cands = [g for g in (lying_grasp_from_axis(+_can_axis, cube_tgt_pos, RHP12_TCP_DEPTH),
-                                                   lying_grasp_from_axis(-_can_axis, cube_tgt_pos, RHP12_TCP_DEPTH))
-                                       if g is not None]
-                        print(f"  [누운픽] 캔축={_can_axis.round(2)} → ±축 후보 {len(grasp_cands)}개(대칭, 손목 최소)", flush=True)
+                    _can_axis = obj_R @ np.array([0.0, 0.0, 1.0])   # 캔 축(월드)
+                    grasp_cands = [g for g in (lying_grasp_from_axis(+_can_axis, cube_tgt_pos, RHP12_TCP_DEPTH),
+                                               lying_grasp_from_axis(-_can_axis, cube_tgt_pos, RHP12_TCP_DEPTH))
+                                   if g is not None]
                     grasp_world = grasp_cands[0] if grasp_cands else None
                     pre_world = (pregrasp_from_grasp(grasp_world, PREGRASP_STANDOFF)
                                  if grasp_world is not None else None)
+                    print(f"  [누운픽] 캔축={_can_axis.round(2)} → 위에서 파지 후보 {len(grasp_cands)}개(±축, plan_grasp이 손목 최소 선택)", flush=True)
                 else:
                     grasp_world, pre_world, grasp_cands = select_best_reachable_grasp(
                         grasps_w, scores, ik_solver, tensor_args, cu_js, robot_base, retract_t,
@@ -2688,7 +2498,7 @@ def main():
                     print(f"  [충돌월드] 타겟 캔 장애물 해제({len(_tnames)}개, key={_tkey})", flush=True)
                 except Exception as _e:
                     print(f"  [충돌월드] 타겟 해제 실패: {_e}", flush=True)
-                state    = GS.PLAN_LIFT
+                state    = GS.MOVE_LIFT   # [효율,사용자] 클리어 리프트 생략 → 닫은 직후 attach→운반(운반이 곧 들어올림)
                 wait_cnt = 0
                 fail_cnt = 0
             else:
@@ -2712,120 +2522,49 @@ def main():
                     state = GS.QUERY_GRASP if grasp_client is not None else GS.PLAN_PREGRASP
 
         elif state == GS.PLAN_LIFT:
-            # 물리 파지 리프트: kinematic attach 없이, 그리퍼 닫은 채 grasp 자세 유지하며 +z 상승.
-            #   캔은 마찰로 딸려 올라와야 함(파지 성공 판정). 자세는 grasp 그대로(옆파지 유지).
+            # [효율 개선] 파지확인용 리프트(plan_single)·성공판정 제거(사용자 지시). 위로 올리는 건
+            #   cuRobo 플래너 대신 짧은 직접IK(책상 클리어 목적만 — 들어 직선상승은 충돌무관). 판정/재파지 없음.
+            #   → cuRobo 플래닝 호출 1개 절감(다음 PLAN_CARRY가 통합 운반). grasp 자세(옆파지) 유지.
             lift_world = grasp_world.copy()
-            lift_world[2, 3] += 0.12    # 위로 올림(side 자세 유지)
-            # ★리프트도 plan_single(충돌회피). grasp→+z 상승 동안 손목이 책상에 안 박히게 궤적 검사.
-            lift_cpose = mat4_to_curobo_pose(lift_world, tensor_args)
-            res_lift   = motion_gen.plan_single(cu_js.unsqueeze(0), lift_cpose, plan_config)
-            print(f"  [6] 리프트(plan_single, 회피) → z={lift_world[2,3]:.3f}m, "
-                  f"{'OK' if res_lift.success.item() else '실패'}", flush=True)
-            if res_lift.success.item():
-                cmd = motion_gen.get_full_js(res_lift.get_interpolated_plan())
-                execute_plan(cmd, sim_js_names, robot_art, ctrl, my_world, extra_steps=1,
-                             track_tag="lift", arm_only=True)   # 그리퍼 닫힘 유지(캔 떨굼 방지)
-                for _ in range(20):       # 정착
-                    my_world.step(render=True)
-                state = GS.MOVE_LIFT
-            elif args.objects > 1:
-                # [Phase3] 리프트 플랜 실패: 그리퍼 열고 같은 타겟 재선별 1회 → 재실패 시 스킵.
-                set_gripper(ctrl, robot_art, sim_js_names, my_world, GRIP_OPEN, steps=30)
-                tgt_retry += 1
-                if tgt_retry >= 2:
-                    targets[cur_tgt_i]["status"], targets[cur_tgt_i]["reason"] = "skipped", "lift_plan_fail"
-                    print(f"  [다물체] {targets[cur_tgt_i]['path']} 스킵(lift_plan_fail)", flush=True)
-                    _goal_h = JointState(position=retract_t.view(1, -1), joint_names=list(arm_joint_names))
-                    _rh = motion_gen.plan_single_js(cu_js.unsqueeze(0), _goal_h, plan_config)
-                    if _rh.success.item():
-                        execute_plan(motion_gen.get_full_js(_rh.get_interpolated_plan()),
-                                     sim_js_names, robot_art, ctrl, my_world, extra_steps=1,
-                                     track_tag="reset_home")
-                    state = GS.IDLE
-                else:
-                    print("  [6] 리프트 plan 실패 → 그리퍼 열고 같은 타겟 재선별", flush=True)
-                    for _ in range(120):
-                        my_world.step(render=True)
-                        try:
-                            if np.linalg.norm(target_cube.get_linear_velocity()) < 0.004:
-                                break
-                        except Exception:
-                            break
-                    cube_tgt_pos = target_cube.get_world_pose()[0].copy()
-                    state = GS.QUERY_GRASP
-            else:
-                print("  [6] 리프트 plan_single 실패 → 잡은 채 정지(HOLD)", flush=True)
-                state = GS.HOLD
+            lift_world[2, 3] += 0.10
+            print(f"  [5] 클리어 리프트(직접IK, 판정X) → z={lift_world[2,3]:.3f}m", flush=True)
+            move_direct_ik(lift_world, ik_solver, tensor_args, cu_js.position, arm_joint_names,
+                           robot_art, ctrl, my_world, steps=45, settle=5)
+            state = GS.MOVE_LIFT
+            wait_cnt = 0
 
         elif state == GS.MOVE_LIFT:
-            cp, _ = target_cube.get_world_pose()
-            lifted = cp[2] - cube_tgt_pos[2]
-            success = lifted > 0.05   # 마찰로 5cm 이상 딸려 올라오면 물리 파지 성공
-            print(f"  [7] 리프트 {'✅✅ 물리파지 성공' if success else '⚠️ 캔 안딸려옴(파지 실패/미끄러짐)'} "
-                  f"물체z={cp[2]:.3f}(+{lifted:.3f}m)", flush=True)
+            # [효율 개선] 들어서 파지확인하는 단계 제거(사용자). 닫음을 신뢰하고 바로 attach → 통합 운반.
             save_shot("lift")
-            if success or regrasp_cnt >= MAX_REGRASP:
-                if not success:
-                    print(f"  [재파지] {MAX_REGRASP}회 초과 → 이번 사이클 포기", flush=True)
-                regrasp_cnt = 0
-                if args.place and success:
-                    # 든 물체를 robot에 attach → carry/home plan_single이 물체 부피까지 무충돌 인지.
-                    #   ★attach 버그픽스 유지(attached_object 링크) — 반환값 검증.
-                    try:
-                        _cp_w, _cq_w = target_cube.get_world_pose()          # 월드(pos, [w,x,y,z])
-                        _cp_b = (np.asarray(_cp_w) - _ROBOT_BASE_OFFSET).astype(float)
-                        _sc2 = CYLSPEC
-                        _held = Cuboid(
-                            name="held_can",
-                            pose=[float(_cp_b[0]), float(_cp_b[1]), float(_cp_b[2]),
-                                  float(_cq_w[0]), float(_cq_w[1]), float(_cq_w[2]), float(_cq_w[3])],
-                            dims=[2 * _sc2["radius"], 2 * _sc2["radius"], _sc2["height"]],
-                        )
-                        _ok_at = motion_gen.attach_external_objects_to_robot(
-                            joint_state=cu_js,
-                            external_objects=[_held],
-                            surface_sphere_radius=0.005,
-                            sphere_fit_type=SphereFitType.VOXEL_VOLUME_SAMPLE_SURFACE,
-                        )
-                        attached = bool(_ok_at) if _ok_at is not None else True
-                        if attached:
-                            print(f"  [attach] ✅ 든 물체 부피 부착(cuRobo 충돌인지) dims={[round(2*_sc2['radius'],3),round(2*_sc2['radius'],3),round(_sc2['height'],3)]}", flush=True)
-                        else:
-                            print("  [attach] ❌ 부착 실패(attached_object 슬롯 부족?) — 든 물체 충돌 미인지!", flush=True)
-                    except Exception as _e:
-                        print(f"  [attach] 실패(무시하고 진행): {_e}", flush=True)
-                    state = GS.PLAN_CARRY     # 매대 배치(충돌회피)
-                elif args.objects > 1:
-                    # [Phase3] 파지 미끄러짐 한도 초과 → 스킵, 그리퍼 열고 홈 복귀 후 다음 타겟
-                    targets[cur_tgt_i]["status"], targets[cur_tgt_i]["reason"] = "skipped", "grasp_slip"
-                    print(f"  [다물체] {targets[cur_tgt_i]['path']} 스킵(grasp_slip)", flush=True)
-                    set_gripper(ctrl, robot_art, sim_js_names, my_world, GRIP_OPEN, steps=30)
-                    _goal_h = JointState(position=retract_t.view(1, -1), joint_names=list(arm_joint_names))
-                    _rh = motion_gen.plan_single_js(cu_js.unsqueeze(0), _goal_h, plan_config)
-                    if _rh.success.item():
-                        _cmd = motion_gen.get_full_js(_rh.get_interpolated_plan())
-                        execute_plan(_cmd, sim_js_names, robot_art, ctrl, my_world,
-                                     extra_steps=1, track_tag="reset_home")
-                    state = GS.IDLE
-                else:
-                    state = GS.HOLD
-                wait_cnt = 0
+            if args.place:
+                # 든 물체 부피를 robot에 attach → 통합 carry/home plan_single이 무충돌 인지(외부 Cuboid 프록시).
+                try:
+                    _cp_w, _cq_w = target_cube.get_world_pose()          # 월드(pos, [w,x,y,z])
+                    _cp_b = (np.asarray(_cp_w) - _ROBOT_BASE_OFFSET).astype(float)
+                    _sc2 = CYLSPEC
+                    _held = Cuboid(
+                        name="held_can",
+                        pose=[float(_cp_b[0]), float(_cp_b[1]), float(_cp_b[2]),
+                              float(_cq_w[0]), float(_cq_w[1]), float(_cq_w[2]), float(_cq_w[3])],
+                        dims=[2 * _sc2["radius"], 2 * _sc2["radius"], _sc2["height"]],
+                    )
+                    _ok_at = motion_gen.attach_external_objects_to_robot(
+                        joint_state=cu_js,
+                        external_objects=[_held],
+                        surface_sphere_radius=0.005,
+                        sphere_fit_type=SphereFitType.VOXEL_VOLUME_SAMPLE_SURFACE,
+                    )
+                    attached = bool(_ok_at) if _ok_at is not None else True
+                    if attached:
+                        print(f"  [attach] ✅ 든 물체 부피 부착(cuRobo 충돌인지) dims={[round(2*_sc2['radius'],3),round(2*_sc2['radius'],3),round(_sc2['height'],3)]}", flush=True)
+                    else:
+                        print("  [attach] ❌ 부착 실패(attached_object 슬롯 부족?) — 든 물체 충돌 미인지!", flush=True)
+                except Exception as _e:
+                    print(f"  [attach] 실패(무시하고 진행): {_e}", flush=True)
+                state = GS.PLAN_CARRY
             else:
-                # 그립 실패 → 그리퍼 열고 캔 재안정·재측정 후 다시 파지
-                regrasp_cnt += 1
-                print(f"  [재파지] 그립 실패 → 재시도 {regrasp_cnt}/{MAX_REGRASP}", flush=True)
-                set_gripper(ctrl, robot_art, sim_js_names, my_world, GRIP_OPEN, steps=30)
-                for _ in range(150):
-                    my_world.step(render=True)
-                    try:
-                        if np.linalg.norm(target_cube.get_linear_velocity()) < 0.004:
-                            break
-                    except Exception:
-                        break
-                cp2, _ = target_cube.get_world_pose()
-                cube_tgt_pos = cp2.copy()
-                state    = GS.QUERY_GRASP if grasp_client is not None else GS.PLAN_PREGRASP
-                wait_cnt = 0
+                state = GS.HOLD     # 비-place(파지 데모)는 잡은 채 유지
+            wait_cnt = 0
 
         elif state == GS.HOLD:
             wait_cnt += 1                # 잡은 채 잠시 유지 (그리퍼 닫힘 타겟 persist)
@@ -2914,27 +2653,48 @@ def main():
                 continue
             place_x, place_y = SHELF3_SLOTS[cur_slot]
             print(f"  [슬롯] {cur_slot+1}/{len(SHELF3_SLOTS)} (x={place_x:.2f}, y={place_y:.2f}) 사용", flush=True)
-            pre_center  = [place_x, SHELF3_PRE_Y, entry_z]
-            carry_world = side_grasp_from_approach(SHELF3_APPROACH, pre_center, RHP12_TCP_DEPTH)
-            cpose = mat4_to_curobo_pose(carry_world, tensor_args)
-            print(f"  [P1] 매대 앞 운반(plan_single, 회피) → TCP {np.round(pre_center,3)} "
-                  f"(캔바닥≈{SHELF3_LIP_TOP+SHELF3_ENTRY_CLR:.3f}, 앞턱 위)", flush=True)
-            result = motion_gen.plan_single(cu_js.unsqueeze(0), cpose, plan_config)
-            if result.success.item():
-                cmd = motion_gen.get_full_js(result.get_interpolated_plan())
-                execute_plan(cmd, sim_js_names, robot_art, ctrl, my_world, extra_steps=1,
-                             track_tag="carry", arm_only=True, viz=_viz_cb)   # 그리퍼 닫힘 유지(캔 떨굼 방지)
-                save_shot("carry_preshelf")
-                print("  [P2] 매대 앞 도달", flush=True)
-                log_arm_deg(robot_art, arm_joint_names, "carry/매대앞")
-                state = GS.INSERT_SHELF
+            # [전구간 cuRobo, 사용자] attach(든 물체)+매대 측벽/뒷벽/턱이 모두 충돌모델에 있으므로
+            #   수동 진입/하강 안무 없이 **안착 포즈까지 plan_single로 직행** → cuRobo가 알아서 턱 넘어 직립 안착.
+            #   단계적 폴백: ①안착 직행 → ②진입높이 직행+하강 → ③앞접근+moveL.
+            rest_world  = side_grasp_from_approach(SHELF3_APPROACH, [place_x, place_y, _pz_c],   RHP12_TCP_DEPTH)
+            entry_world = side_grasp_from_approach(SHELF3_APPROACH, [place_x, place_y, entry_z], RHP12_TCP_DEPTH)
+            res_r = motion_gen.plan_single(cu_js.unsqueeze(0),
+                                           mat4_to_curobo_pose(rest_world, tensor_args), plan_config)
+            if res_r.success.item():
+                print(f"  [P1] 안착까지 직행 plan_single(매대+든물체 회피, 수동 진입/하강 없음) → rest TCPz {_pz_c:.3f}", flush=True)
+                execute_plan(motion_gen.get_full_js(res_r.get_interpolated_plan()), sim_js_names,
+                             robot_art, ctrl, my_world, extra_steps=1, track_tag="carry_place",
+                             arm_only=True, viz=_viz_cb)
+                _direct_place = True
+                save_shot("carry_preshelf"); log_arm_deg(robot_art, arm_joint_names, "carry/안착직행")
+                state = GS.LOWER_SHELF
             else:
-                print("  [P1] 운반 plan_single 실패 → 직접IK 폴백", flush=True)
-                if move_direct_ik(carry_world, ik_solver, tensor_args, cu_js.position,
-                                  arm_joint_names, robot_art, ctrl, my_world, viz=_viz_cb):
-                    save_shot("carry_preshelf"); state = GS.INSERT_SHELF
+                res_d = motion_gen.plan_single(cu_js.unsqueeze(0),
+                                               mat4_to_curobo_pose(entry_world, tensor_args), plan_config)
+                if res_d.success.item():
+                    print(f"  [P1] 안착직행 실패 → 진입높이 직행 plan_single + 하강 → entry TCPz {entry_z:.3f}", flush=True)
+                    execute_plan(motion_gen.get_full_js(res_d.get_interpolated_plan()), sim_js_names,
+                                 robot_art, ctrl, my_world, extra_steps=1, track_tag="carry_insert",
+                                 arm_only=True, viz=_viz_cb)
+                    _direct_place = False
+                    save_shot("carry_preshelf"); state = GS.LOWER_SHELF
                 else:
-                    print("  [P1] 운반 IK도 실패 → 정지(HALT)", flush=True); state = GS.HALT
+                    _direct_place = False
+                    pre_center  = [place_x, SHELF3_PRE_Y, entry_z]
+                    carry_world = side_grasp_from_approach(SHELF3_APPROACH, pre_center, RHP12_TCP_DEPTH)
+                    print(f"  [P1] 직행 모두 실패 → 매대 앞+moveL 폴백 → TCP {np.round(pre_center,3)}", flush=True)
+                    result = motion_gen.plan_single(cu_js.unsqueeze(0),
+                                                    mat4_to_curobo_pose(carry_world, tensor_args), plan_config)
+                    if result.success.item():
+                        execute_plan(motion_gen.get_full_js(result.get_interpolated_plan()), sim_js_names,
+                                     robot_art, ctrl, my_world, extra_steps=1, track_tag="carry",
+                                     arm_only=True, viz=_viz_cb)
+                        save_shot("carry_preshelf"); state = GS.INSERT_SHELF
+                    elif move_direct_ik(carry_world, ik_solver, tensor_args, cu_js.position,
+                                        arm_joint_names, robot_art, ctrl, my_world, viz=_viz_cb):
+                        save_shot("carry_preshelf"); state = GS.INSERT_SHELF
+                    else:
+                        print("  [P1] 운반 실패 → 정지(HALT)", flush=True); state = GS.HALT
 
         elif state == GS.INSERT_SHELF:
             # moveL: 매대 앞(PRE) → 안(IN), +y로만 직선 이동(진입높이 유지 → 캔이 앞턱 위로 통과).
@@ -2955,26 +2715,29 @@ def main():
             # moveL: 매대 안(IN) → 안착(PLACE), -z로만 직선 하강. 안착높이=바닥+여유+half+그립오프셋
             #   → 캔 바닥이 바닥판(1.14) 바로 위에 놓임(박힘 없음). 앞턱 뒤(IN_Y)라 턱 간섭 없음.
             _half_c = CYLSPEC["height"] / 2.0
-            entry_z = SHELF3_LIP_TOP   + SHELF3_ENTRY_CLR + _half_c + grip_z_offset
             place_z = SHELF3_FLOOR_TOP + SHELF3_REST_CLR  + _half_c + grip_z_offset
-            low_from  = side_grasp_from_approach(SHELF3_APPROACH, [place_x, place_y, entry_z], RHP12_TCP_DEPTH)
-            low_world = side_grasp_from_approach(SHELF3_APPROACH, [place_x, place_y, place_z], RHP12_TCP_DEPTH)
-            log_ceil_headroom("안착자세", low_world, ik_solver, tensor_args, cu_js, robot_base,
-                              _half_c, grip_z_offset)   # Stage7 2층 스파이크: 천장 간섭 예측
-            print(f"  [P4] 하강 안착(moveL -z) → @TCPz {place_z:.3f} (캔바닥≈{SHELF3_FLOOR_TOP+SHELF3_REST_CLR:.3f}, 바닥판 위)", flush=True)
-            move_linear_ik(low_from, low_world, ik_solver, tensor_args, cu_js.position,
-                           arm_joint_names, robot_art, ctrl, my_world, viz=_viz_cb, tag="-z하강",
-                           settle=0)   # [Stage5] 그리퍼 램프 오픈(40스텝)이 사실상 정착 역할
+            if _direct_place:
+                # 안착 직행(cuRobo)으로 이미 안착 포즈 도달 → 하강 moveL 생략, 바로 그리퍼 열기.
+                print(f"  [P4] cuRobo 안착 직행 → 하강 moveL 생략 (@TCPz {place_z:.3f})", flush=True)
+            else:
+                entry_z = SHELF3_LIP_TOP + SHELF3_ENTRY_CLR + _half_c + grip_z_offset
+                low_from  = side_grasp_from_approach(SHELF3_APPROACH, [place_x, place_y, entry_z], RHP12_TCP_DEPTH)
+                low_world = side_grasp_from_approach(SHELF3_APPROACH, [place_x, place_y, place_z], RHP12_TCP_DEPTH)
+                log_ceil_headroom("안착자세", low_world, ik_solver, tensor_args, cu_js, robot_base,
+                                  _half_c, grip_z_offset)
+                print(f"  [P4] 하강 안착(moveL -z) → @TCPz {place_z:.3f} (캔바닥≈{SHELF3_FLOOR_TOP+SHELF3_REST_CLR:.3f}, 바닥판 위)", flush=True)
+                move_linear_ik(low_from, low_world, ik_solver, tensor_args, cu_js.position,
+                               arm_joint_names, robot_art, ctrl, my_world, viz=_viz_cb, tag="-z하강",
+                               settle=0)
             # ★매대 안에서는 부분 열림(GRIP_RELEASE) — 풀오픈은 근위바가 좌우로 벌어져 측벽/이웃캔 간섭 (Stage6 이식)
             set_gripper(ctrl, robot_art, sim_js_names, my_world, GRIP_RELEASE, steps=40)   # 캔 안착
-            for _si in range(120):       # 캔 안정 대기
-                my_world.step(render=(_si % 6 == 0))   # [런타임] 안정화 렌더 드물게
+            for _ in range(120):       # 캔 안정 대기
+                my_world.step(render=True)
                 try:
                     if np.linalg.norm(target_cube.get_linear_velocity()) < 0.004:
                         break
                 except Exception:
                     break
-            my_world.step(render=True)   # 캡처(placed) 직전 프레임 갱신
             _cp, _ = target_cube.get_world_pose()
             _upright = abs(_cp[2] - (SHELF3_FLOOR_TOP + _half_c)) < 0.03   # 캔중심≈바닥+half면 직립
             print(f"  [P5] 그리퍼 부분열림({GRIP_RELEASE}rad≈간격81mm, 매대간섭 회피). 캔 안착 월드={np.round(_cp,3)} "
@@ -2996,16 +2759,18 @@ def main():
             state = GS.RETREAT_SHELF
 
         elif state == GS.RETREAT_SHELF:
-            # moveL: 안착 위치(PLACE) → 매대 앞(같은 높이), -y로만 직선 후퇴(그리퍼 오픈 상태).
+            # ★[버그수정] -y 후퇴는 중앙파지 부분개방 그리퍼가 톨 보틀을 끌어내 매대 밖으로 떨굼.
+            #   → 대신 +z로 곧장 들어올려(개방천장) 그리퍼가 병에서 위로 벗어남. 이후 home은 plan_single_js(회피).
             _half_c = CYLSPEC["height"] / 2.0
             place_z = SHELF3_FLOOR_TOP + SHELF3_REST_CLR + _half_c + grip_z_offset
-            ret_from  = side_grasp_from_approach(SHELF3_APPROACH, [place_x, place_y,      place_z], RHP12_TCP_DEPTH)
-            ret_world = side_grasp_from_approach(SHELF3_APPROACH, [place_x, SHELF3_PRE_Y, place_z], RHP12_TCP_DEPTH)
-            print(f"  [P6] 매대 밖 -y 후퇴(moveL) → y {place_y}→{SHELF3_PRE_Y} @TCPz {place_z:.3f}", flush=True)
+            up_z = place_z + _half_c + 0.05    # 병 윗면 위로(개방천장 통과) — 그리퍼가 병에서 완전히 벗어남
+            ret_from  = side_grasp_from_approach(SHELF3_APPROACH, [place_x, place_y, place_z], RHP12_TCP_DEPTH)
+            ret_world = side_grasp_from_approach(SHELF3_APPROACH, [place_x, place_y, up_z],    RHP12_TCP_DEPTH)
+            print(f"  [P6] 매대서 +z 이탈(moveL, 병 안 끌게) → TCPz {place_z:.3f}→{up_z:.3f}", flush=True)
             move_linear_ik(ret_from, ret_world, ik_solver, tensor_args, cu_js.position,
-                           arm_joint_names, robot_art, ctrl, my_world, viz=_viz_cb, tag="-y후퇴",
-                           settle=0)   # [Stage5] home 플랜과 연속
-            state = GS.GO_HOME    # cu_js 갱신 위해 다음 iteration에서 home 복귀
+                           arm_joint_names, robot_art, ctrl, my_world, viz=_viz_cb, tag="+z이탈",
+                           settle=0)
+            state = GS.GO_HOME    # cu_js 갱신 위해 다음 iteration에서 home 복귀(plan_single_js가 -y 빠짐 처리)
 
         elif state == GS.GO_HOME:
             # ★충돌회피 시연: 매대 앞 → home(retract)까지 plan_single_js(관절공간 충돌회피).
