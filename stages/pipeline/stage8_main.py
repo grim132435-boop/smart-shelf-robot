@@ -55,6 +55,8 @@ parser.add_argument("--obj-dist", type=float, default=0.50,
                     help="캔 생성 거리(robot base로부터 +x, m). 0.58+이면 +x 정면 side 파지 IK 가능(도달맵 d≥0.45)")
 parser.add_argument("--target-dy", type=float, default=0.0,
                     help="타겟 캔의 측면(y) 오프셋(m). 0이 아니면 옆쪽 캔을 픽 타겟으로(파란색 표시). 클러터 사이 측면 파지 데모")
+parser.add_argument("--snack-only", action="store_true",
+                    help="--mixed에서 캔·병 스킵, 봉지만 실행(빠른 적치 튜닝용)")
 parser.add_argument("--objects", type=int, default=1,
                     help="[Phase3 다물체] 픽 대상 캔 개수. 1=기존 단일(기본). N>1이면 y줄 스폰 → 순차 슬롯 적재(--place 필요)")
 parser.add_argument("--obj-gap", type=float, default=0.15,
@@ -467,6 +469,27 @@ def toggle_bag_collision(stage, enabled, bag_path="/World/snack_bag"):
         print(f"  [봉지콜리전] {'ON' if enabled else 'OFF'} — 그리퍼 close 시 kinematic 봉지 관통 폭발 방지", flush=True)
 
 
+def filter_bag_gripper_collision(stage, robot_prim_path, bag_path="/World/snack_bag"):
+    """봉지↔그리퍼 충돌 쌍만 제외(FilteredPairsAPI). 봉지 콜리전은 항상 ON으로 유지(시작 시 쿠킹) →
+    파지/운반 시 그리퍼와 안 부딪혀 폭발 없음 + 적치 시 봉지↔거치대/매대 충돌은 살아있어
+    그리퍼 오픈+dynamic 전환 시 실제 중력으로 자연 안착(런타임 콜리전 재활성 불필요)."""
+    from pxr import UsdPhysics
+    bag = stage.GetPrimAtPath(bag_path)
+    if not (bag and bag.IsValid()):
+        return
+    links = ["link_5", "link_6", "gripper_rh_p12_rn_base",
+             "gripper_rh_p12_rn_l1", "gripper_rh_p12_rn_l2",
+             "gripper_rh_p12_rn_r1", "gripper_rh_p12_rn_r2"]
+    fp = UsdPhysics.FilteredPairsAPI.Apply(bag)
+    rel = fp.CreateFilteredPairsRel()
+    n = 0
+    for lk in links:
+        p = f"{robot_prim_path}/{lk}"
+        if stage.GetPrimAtPath(p).IsValid():
+            rel.AddTarget(p); n += 1
+    print(f"  [봉지필터] 봉지↔그리퍼 {n}개 링크 충돌 제외(FilteredPairs) — 콜리전 항상 ON 유지", flush=True)
+
+
 def tune_rigid_grasp_iters(stage, prim_path, pos_iter=192, vel_iter=1, max_depen=5.0):
     """강체 파지 안정(NVIDIA Factory 레시피): 솔버 position iteration↑(관통방지 핵심), velocity
     iteration=1(↑면 접촉이 물러져 수렴 악화 — 기존 vel=8이 오히려 해로웠음), max depenetration 속도.
@@ -804,7 +827,7 @@ def setup_wrist_camera(stage, ee_prim_path):
 
 
 def open_wrist_viewport(cam_path):
-    """두 번째 뷰포트 창 생성 → 손목 카메라 바인딩. 메인 창은 기존 persp 유지."""
+    """두 번째 뷰포트 창 생성 → 손목 카메라 바인딩. floating 창(사용자가 직접 배치)."""
     try:
         from omni.kit.viewport.utility import create_viewport_window
         win = create_viewport_window(name="RealSense (wrist)", width=640, height=480,
@@ -1522,6 +1545,7 @@ def main():
             _STAND_X, _STAND_Y = (_sc[0], _sc[1]) if _sc else (0.310, 0.530)
             if args.rigid_bag:   # ★B안: 강체 봉지(GPU 불요 → 씬 전체 CPU)
                 spawn_rigid_bag(stage, "/World/snack_bag", (_snack_cx, _snack_cy), _table_top)
+                filter_bag_gripper_collision(stage, ROBOT_PRIM)   # 봉지↔그리퍼만 충돌 제외(콜리전 항상 ON→자연 안착)
             else:
                 _spawn_snack(stage, _scn_path, (_snack_cx, _snack_cy), _table_top + 0.04, mode="cloth")
             print(f"[혼합] 거치대 위치(에셋서 읽음) = [{_STAND_X:.3f},{_STAND_Y:.3f}]", flush=True)
@@ -1536,6 +1560,11 @@ def main():
         _MIX_LUSED  = {2: [False, False], 3: [False] * len(_MIX_LSLOTS[3])}
         target_cube = targets[0]["obj"]
         args.objects = len(targets)   # 다물체 분기(타겟 순회·적치) 활성화
+        if args.snack_only:           # 캔·병 즉시 스킵 → 봉지만 실행(빠른 튜닝용)
+            for _t in targets:
+                if _t["type"] != "snack":
+                    _t["status"] = "placed"; _t["reason"] = "snack_only_skip"
+            print("[--snack-only] 캔·병 스킵 → 봉지 바로 실행", flush=True)
         print(f"[혼합] 타겟 {len(targets)}개 — {'캔1(2층)+병1(3층)+봉지1(3층 거치대) 3종' if not args.dr else 'DR 캔2+병2'}", flush=True)
     elif _obj_type in ("cylinder", "bottle") and args.objects > 1:
         # ── Phase3 다물체: 픽 대상 캔 N개를 y줄로 스폰(전부 동적=전부 픽 대상) ──
@@ -1842,8 +1871,7 @@ def main():
                 print("  [GPU] 로봇 articulation 솔버 iteration(pos192/vel1, Factory레시피) — 관통방지", flush=True)
             except Exception as _e:
                 print(f"  [GPU] articulation 솔버 설정 실패(무시): {_e}", flush=True)
-    my_world.play()
-    set_scene_camera()        # PNG/뷰포트가 로봇·캔·매대를 크게 잡도록 카메라 배치
+    set_scene_camera()        # PNG/뷰포트가 로봇·캔·매대를 크게 잡도록 카메라 배치 (play는 뷰포트 생성 후)
 
     # ── 루프 변수 ───────────────────────────────────────────────────────────
     ctrl         = None
@@ -1870,6 +1898,15 @@ def main():
     _wrist_cam_path = setup_wrist_camera(stage, ee_prim_path)
     if _wrist_cam_path:
         open_wrist_viewport(_wrist_cam_path)
+
+    # ★play 전 20초 대기 — 사용자가 RealSense 뷰포트 창을 원하는 위치로 옮길 시간. 렌더만(물리 정지).
+    print("  [대기] 뷰포트 배치용 20초 대기 후 play …", flush=True)
+    import time as _wt
+    _w0 = _wt.time()
+    while _wt.time() - _w0 < 20.0:
+        simulation_app.update()
+    my_world.play()
+    print("  [play] 시뮬 시작", flush=True)
 
     # 시작 시 stale stop-sentinel 제거
     if os.path.exists(STOP_FILE):
@@ -2166,11 +2203,11 @@ def main():
                 save_shot("snack_01_open")
                 if _plan_move(_ee_side(_snack_cx, _snack_cy, _bag_top + 0.06), "above"):   # 접근(매끄럽게)
                     save_shot("snack_02_above")
-                    # ★[#2b] 봉지 파지 동안 책상 콜리전 OFF + ★봉지 자체 콜리전 OFF(폭발원: 그리퍼가 kinematic 봉지 convexHull 관통→폭발).
-                    #   봉지는 kinematic 추종+cuRobo 프록시라 물리 콜리전 불요 → 계속 OFF 유지(리프트 후 재활성 안 함).
+                    # ★[#2b] 봉지 파지 동안 책상 콜리전만 OFF(그리퍼 손가락 책상 침투 방지).
+                    #   ★봉지 콜리전은 끄지 않음 — FilteredPairs로 봉지↔그리퍼만 제외(폭발 방지) + 봉지↔거치대 충돌
+                    #   살려둬 적치 시 실제 중력으로 자연 안착(런타임 재활성 불필요).
                     if args.rigid_bag:
                         toggle_table_collision(stage, False)
-                        toggle_bag_collision(stage, False)
                     # 진입: 봉지에 일부러 접촉(plan_single은 충돌로 거부) → 직접 IK 유지
                     move_direct_ik(_ee_side(_snack_cx, _snack_cy, _bag_mid), ik_solver, tensor_args,
                                    _refresh_cujs().position, arm_joint_names, robot_art, ctrl, my_world, steps=30, settle=6)  # ★진입 빠르게(50/8→30/6, 사용자: 하강 아직 느림)
@@ -2220,23 +2257,27 @@ def main():
                                 [_Gf.Vec3f(_M.Transform(_pl)) for _pl in _Plocal])
                         my_world.add_physics_callback("snack_follow", _snack_follow)
                     else:
-                        # [B안 강체] 봉지 kinematic 전환 + EE 상대변환 추종(기존 방식). 파지 위치는 원래, 봉지 부착만 +4cm(책상 겹침 방지).
-                        from pxr import UsdPhysics as _UPb
+                        # [B안 강체] ★고정 조인트(FixedJoint)로 봉지를 그리퍼에 물리 부착 — kinematic 추종(위치만·회전 안먹음) 대체.
+                        #   실제 강체 구속이라 그리퍼 틸트/회전을 봉지가 완전히 따라감. 봉지는 dynamic(중력有)이지만
+                        #   조인트가 EE에 고정 → 떨어지지 않음. 릴리즈 시 조인트만 삭제하면 즉시 중력 낙하(자연 안착).
+                        from pxr import UsdPhysics as _UPb, Sdf as _Sdf
                         _bag_prim = stage.GetPrimAtPath("/World/snack_bag")
-                        _UPb.RigidBodyAPI(_bag_prim).CreateKinematicEnabledAttr(True)
-                        _Mb0 = UsdGeom.Xformable(_bag_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-                        _tb0 = _Mb0.ExtractTranslation()
-                        # ★attach DZ 제거: 봉지가 그리퍼 안쪽으로 끌려들어가는 시각 버그 → 그리퍼 닫힌 그 자리에서 추종 시작
-                        _Mee0i = UsdGeom.Xformable(stage.GetPrimAtPath(ee_prim_path)).ComputeLocalToWorldTransform(Usd.TimeCode.Default()).GetInverse()
-                        _relB = _Mb0 * _Mee0i    # bag_world(t) = _relB * ee_world(t) (봉지 +4cm 띄워 부착)
-                        _xfb = UsdGeom.Xformable(_bag_prim)
-                        _xfb.ClearXformOpOrder()
-                        _opb = _xfb.AddTransformOp()
-                        def _rigid_bag_follow(dt):
-                            _Mee = UsdGeom.Xformable(stage.GetPrimAtPath(ee_prim_path)).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-                            _opb.Set(_relB * _Mee)
-                        my_world.add_physics_callback("rigid_bag_follow", _rigid_bag_follow)
-                        print("  [B안] 강체 봉지 kinematic 추종 시작(EE 상대변환, 부착 +4cm)", flush=True)
+                        _BAG_JOINT = "/World/snack_bag_grip_joint"
+                        _ee_w  = UsdGeom.Xformable(stage.GetPrimAtPath(ee_prim_path)).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+                        _bag_w = UsdGeom.Xformable(_bag_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+                        _bag_in_ee = _bag_w * _ee_w.GetInverse()   # 봉지의 EE 로컬 포즈(현재 상대자세 보존)
+                        _jt = _bag_in_ee.ExtractTranslation()
+                        _jq = _bag_in_ee.ExtractRotationQuat()
+                        _jre = float(_jq.GetReal()); _jim = _jq.GetImaginary()
+                        _UPb.RigidBodyAPI(_bag_prim).CreateKinematicEnabledAttr(False)   # dynamic — 조인트가 잡고, 릴리즈 시 낙하
+                        _fj = _UPb.FixedJoint.Define(stage, _BAG_JOINT)
+                        _fj.CreateBody0Rel().SetTargets([_Sdf.Path(ee_prim_path)])
+                        _fj.CreateBody1Rel().SetTargets([_Sdf.Path("/World/snack_bag")])
+                        _fj.CreateLocalPos0Attr().Set(_Gf.Vec3f(float(_jt[0]), float(_jt[1]), float(_jt[2])))
+                        _fj.CreateLocalRot0Attr().Set(_Gf.Quatf(_jre, float(_jim[0]), float(_jim[1]), float(_jim[2])))
+                        _fj.CreateLocalPos1Attr().Set(_Gf.Vec3f(0.0, 0.0, 0.0))
+                        _fj.CreateLocalRot1Attr().Set(_Gf.Quatf(1.0, 0.0, 0.0, 0.0))
+                        print("  [B안] 봉지 고정조인트 부착(그리퍼↔봉지) — 틸트 포함 강체 추종, 릴리즈 시 조인트 삭제로 낙하", flush=True)
                     # cuRobo Cuboid 프록시 attach(그립 시점 — 캔/병과 동일 carry plan_single이 봉지 부피 인지→매대 회피)
                     _bc_b = (np.asarray(_bag_c) - _ROBOT_BASE_OFFSET).astype(float)
                     _held_bag = Cuboid(name="held_bag",
@@ -2268,26 +2309,30 @@ def main():
                     # ── [봉지 거치대 적치 — 하이브리드] cuRobo plan_single = 매대 앞 도달(충돌회피·reach 담당),
                     #   moveL = 거치대 칸 안 짧은 틸트 진입+하강(좁고 의도된 접촉). 순수 cuRobo는 좁은칸+틸트 무충돌경로 없어 실패.
                     import math as _math
-                    _TILT_DEG = -10.0                            # ★틸트 낮춤(-20→-10, 사용자): 매대앞 도달 plan_single reach↑ → direct IK 플립("개병신") 방지
-                    _SX  = _STAND_X                              # 거치대 중심 x
-                    _SYf = _STAND_Y - 0.04                       # y+1 (사용자)
-                    _pre_y   = SHELF3_PRE_Y                      # 매대 앞(수평 진입 시작)
-                    _entry_z = SHELF3_FLOOR_TOP + 0.12            # z+2 (사용자)
-                    def _stand_pose(_xyz):
-                        _b = side_grasp_from_approach(SHELF3_APPROACH, _xyz, RHP12_TCP_DEPTH)   # 수평 +y 접근
-                        _th = _math.radians(_TILT_DEG); _c, _s = _math.cos(_th), _math.sin(_th)
-                        _b[:3, :3] = np.array([[1., 0, 0], [0, _c, -_s], [0, _s, _c]]) @ _b[:3, :3]   # 봉지를 빗면 각으로 틸트
+                    # ★side 진입 + 틸트 점진 보간: 매대 앞은 틸트 0°(IK reach 확보) → 적치 포인트에서 -30°(빗면 기댐).
+                    #   move_linear_ik가 start/target 회전이 다를 때 t에 따라 자동 보간(pp_motion 개선).
+                    _TILT_START  =   0.0   # 진입 시작(매대 앞) 틸트 — IK 가능 범위
+                    _TILT_END    = -25.0   # 적치 포인트 틸트 — 빗면에 납작면 기댐
+                    _SX  = 0.330
+                    _SYf = 0.450
+                    _pre_y   = SHELF3_PRE_Y
+                    _entry_z = 1.285
+                    def _stand_pose_tilt(_xyz, tilt_deg):
+                        _b = side_grasp_from_approach(SHELF3_APPROACH, _xyz, RHP12_TCP_DEPTH)
+                        _th = _math.radians(tilt_deg); _c, _s = _math.cos(_th), _math.sin(_th)
+                        _b[:3, :3] = np.array([[1., 0, 0], [0, _c, -_s], [0, _s, _c]]) @ _b[:3, :3]
                         return _b
-                    # (1) cuRobo plan_single: 매대 앞(tilt)까지 충돌회피 도달 (어려운 reach 담당)
-                    _ok_carry = _plan_move(_stand_pose([_SX, _pre_y, _entry_z]), "carry_above", arm_only=True)
+                    # (1) cuRobo plan_single: 매대 앞(틸트 -25°)까지 도달 → moveL은 y축 평행 이동만(틸트 고정)
+                    _ok_carry = _plan_move(_stand_pose_tilt([_SX, _pre_y, _entry_z], _TILT_END), "carry_above", arm_only=True)
                     save_shot("snack_06_carry")
-                    print(f"[과자봉지] 매대 앞 도달 {'✅' if _ok_carry else '❌'} (cuRobo, tilt) "
+                    print(f"[과자봉지] 매대 앞 도달 {'✅' if _ok_carry else '❌'} (cuRobo, side tilt{_TILT_END}°) "
                           f"TCP=[{_SX:.2f},{_pre_y:.2f},{_entry_z:.3f}]", flush=True)
                     _TACT.mark("snack_bag", "place")
-                    # (2) moveL +y 진입 → 이 위치에서 그리퍼 오픈 (-z 하강 없음, 사용자). waypoints 22=70% 속도.
-                    move_linear_ik(_stand_pose([_SX, _pre_y, _entry_z]), _stand_pose([_SX, _SYf, _entry_z]),
+                    # (2) moveL +y 진입: 틸트 고정(-25°), 순수 y축 평행 이동만.
+                    move_linear_ik(_stand_pose_tilt([_SX, _pre_y, _entry_z], _TILT_END),
+                                   _stand_pose_tilt([_SX, _SYf,  _entry_z], _TILT_END),
                                    ik_solver, tensor_args, _refresh_cujs().position,
-                                   arm_joint_names, robot_art, ctrl, my_world, tag="+y진입", waypoints=22, settle=0)
+                                   arm_joint_names, robot_art, ctrl, my_world, tag="+y진입", settle=0)
                     save_shot("snack_07_placed")
                     # (4) 해제 — ★soften(물성복귀) 안 함. 사용자 관찰: soften 시 cloth가 빗면에서 흘러내림.
                     #   대신 '놓는 순간의 placed 자세 그대로' 봉지를 동결 유지. 파티클 off 상태로 snack_follow만 떼면
@@ -2304,51 +2349,31 @@ def main():
                             _mesh_sb.GetPointsAttr().Set(_Wfix)
                         my_world.add_physics_callback("snack_hold", _snack_hold)
                     else:
-                        # [B안 강체] ★사용자 이전 해결방식: 글라이드/순간이동 대신 '그리퍼가 거치대까지 들고 가서 추종 종료(놓기)'.
-                        #   moveL 진입+하강으로 그리퍼가 봉지를 거치대 위로 가져온 상태 → 추종 콜백만 떼면 봉지가 그 자리에 고정(kinematic).
-                        #   이후 그리퍼 오픈(아래)으로 적치 완료. (틸트 낮춰 진입 reach 확보 → 매대앞 이동 플립 없음)
-                        try: my_world.remove_physics_callback("rigid_bag_follow")
-                        except Exception: pass
-                        print("  [B안] 봉지 추종 종료 — 그리퍼 놓은 자리(거치대)에 고정, 그리퍼 오픈으로 적치", flush=True)
+                        # [B안 강체] 고정조인트가 봉지를 그리퍼에 잡고 있음 → 그리퍼 오픈 후 조인트 삭제로 자연 낙하(아래).
+                        print("  [B안] 봉지 고정조인트 유지 — 그리퍼 오픈 후 조인트 삭제로 중력 낙하", flush=True)
                     try:
                         motion_gen.detach_object_from_robot()   # carry/insert까지 attach 유지 → 여기서 분리(home plan은 봉지 무관)
                         print("  [과자봉지][detach] 프록시 분리(적치 후)", flush=True)
                     except Exception as _ed:
                         print(f"  [과자봉지][detach] 무시: {_ed}", flush=True)
-                    set_gripper(ctrl, robot_art, sim_js_names, my_world, GRIP_OPEN, steps=40)
-                    for _ in range(40): my_world.step(render=True)
+                    set_gripper(ctrl, robot_art, sim_js_names, my_world, GRIP_OPEN, steps=40)   # 그리퍼 오픈(조인트가 봉지 유지)
                     if args.rigid_bag:
-                        # ★[떠있음 해결] 그리퍼 오픈 후, kinematic 봉지를 매대판(SHELF3_FLOOR_TOP)에 바텀이 닿게 부드럽게 하강.
-                        #   원인: follow-stop이 '그리퍼가 든 높은 자세(부착+4cm+하강잔여)' 그대로 동결 → 바닥보다 ~59mm 떠 있음.
-                        #   dynamic 전환 없이 _opb로 매 스텝 조금씩 내려 결정적·안전(폭발/미끄러짐 무). 틸트 유지 → 빗면에 기댐.
+                        # ★실제 물리 낙하: 그리퍼 오픈 직후 고정조인트 삭제 → 봉지가 즉시 중력으로 낙하·거치대 안착.
+                        #   봉지는 이미 dynamic + 콜리전 항상 ON(FilteredPairs로 그리퍼만 제외) → 거치대/매대에 정상 충돌.
                         try:
-                            _bbD = UsdGeom.Boundable(_bag_prim).ComputeWorldBound(
-                                Usd.TimeCode.Default(), UsdGeom.Tokens.default_).ComputeAlignedBox()
-                            _drop = float(_bbD.GetMin()[2]) - (SHELF3_FLOOR_TOP + 0.003)   # 바텀이 매대판+3mm에 오도록
-                            if _drop > 0.001:
-                                _Mnow = UsdGeom.Xformable(_bag_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-                                _tnow = _Mnow.ExtractTranslation()
-                                _N = 12
-                                for _k in range(1, _N + 1):
-                                    _Md = _Gf.Matrix4d(_Mnow)
-                                    _Md.SetTranslateOnly(_Gf.Vec3d(float(_tnow[0]), float(_tnow[1]),
-                                                                   float(_tnow[2]) - _drop * (_k / _N)))
-                                    _opb.Set(_Md)
-                                    my_world.step(render=True)
-                                print(f"  [B안] 봉지 키네마틱 하강 — {_drop*1000:.0f}mm, 바텀≈매대판+3mm", flush=True)
-                            else:
-                                print(f"  [B안] 봉지 이미 안착(여유 {_drop*1000:.0f}mm) — 하강 생략", flush=True)
-                            toggle_bag_collision(stage, True)
-                            from pxr import UsdPhysics as _UPb2
-                            _UPb2.RigidBodyAPI(_bag_prim).CreateKinematicEnabledAttr(False)
-                            print("  [B안] 봉지 중력 활성(kinematic=False)", flush=True)
+                            stage.RemovePrim("/World/snack_bag_grip_joint")
+                            print("  [B안] 봉지 고정조인트 삭제 → 즉시 중력 낙하·거치대 자연 안착", flush=True)
                         except Exception as _edrop:
-                            print(f"  [B안] 봉지 안착 하강 실패(무시): {_edrop}", flush=True)
+                            print(f"  [B안] 조인트 삭제 실패(무시): {_edrop}", flush=True)
+                        for _ in range(10): my_world.step(render=True)   # 최소 대기(조인트 삭제 반영)
+                    else:
+                        for _ in range(40): my_world.step(render=True)
                     _TACT.mark("snack_bag", "home")
-                    # (5a) -y 직선 후진 (캔/병 RETREAT 동일) — 틸트 유지하며 칸 밖으로 똑바로 빠짐(적치 봉지 안 건드림).
-                    move_linear_ik(_stand_pose([_SX, _SYf, _entry_z]), _stand_pose([_SX, _pre_y, _entry_z]),
+                    # (5a) -y 직선 후진 — 틸트 고정(-25°), 순수 y축 후진.
+                    move_linear_ik(_stand_pose_tilt([_SX, _SYf,  _entry_z], _TILT_END),
+                                   _stand_pose_tilt([_SX, _pre_y, _entry_z], _TILT_END),
                                    ik_solver, tensor_args, _refresh_cujs().position,
-                                   arm_joint_names, robot_art, ctrl, my_world, tag="-y이탈", waypoints=15, settle=0)
+                                   arm_joint_names, robot_art, ctrl, my_world, tag="-y이탈", settle=0)
                     save_shot("snack_08_retract")
                     # (5b) home 복귀 — 칸 밖(앞)에서 시작 → cuRobo 충돌회피(plan_single_js)로 안전 복귀.
                     _goal_hs = JointState(position=retract_t.view(1, -1), joint_names=list(arm_joint_names))

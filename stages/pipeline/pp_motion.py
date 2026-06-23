@@ -237,13 +237,16 @@ def highest_sphere_top_world(kin, q_vec, base):
 def move_linear_ik(start_world, target_world, ik_solver, tensor_args, cu_js_pos,
                    arm_joint_names, robot_art, ctrl, my_world,
                    waypoints=40, substeps=2, settle=10, viz=None, tag=""):
-    """TCP를 start→target 데카르트 직선으로 이동(moveL). 위치만 선형보간, 자세 고정.
+    """TCP를 start→target 데카르트 직선으로 이동(moveL). 위치 선형보간, 자세는 start→target 보간.
+    start_world와 target_world의 회전이 다르면 t에 따라 회전도 선형보간(틸트 점진 적용 등).
     웨이포인트마다 IK 풀어 따라감. IK 실패 시 그 지점에서 중단하고 False(부분 이동)."""
     arm_idx = [robot_art.get_dof_index(n) for n in arm_joint_names]
     nA = len(arm_joint_names)
     p0 = np.asarray(start_world[:3, 3],  dtype=np.float64)
     p1 = np.asarray(target_world[:3, 3], dtype=np.float64)
-    R  = target_world[:3, :3]                     # 자세 고정(직립 유지)
+    R0 = np.asarray(start_world[:3, :3],  dtype=np.float64)
+    R1 = np.asarray(target_world[:3, :3], dtype=np.float64)
+    _interp_R = not np.allclose(R0, R1, atol=1e-6)   # 회전이 다를 때만 보간
     # ★TCP 균일속도(사용자): 웨이포인트를 거리비례로 산출(고정 waypoints면 짧은구간 느리고 긴구간 빠름).
     #   웨이포인트당 12mm → 모든 moveL 구간의 TCP 선속도 동일. (4mm는 너무 잘아 텍타임 3배 → 12mm로 적정화)
     _dist = float(np.linalg.norm(p1 - p0))
@@ -254,7 +257,12 @@ def move_linear_ik(start_world, target_world, ik_solver, tensor_args, cu_js_pos,
     for i in range(1, waypoints + 1):
         t  = i / waypoints
         Tw = np.eye(4, dtype=np.float32)
-        Tw[:3, :3] = R
+        if _interp_R:
+            # 회전 선형보간 후 QR 재정규화(짧은 회전에서 충분히 정확)
+            _Ri = (1.0 - t) * R0 + t * R1
+            _U, _, _Vt = np.linalg.svd(_Ri); Tw[:3, :3] = (_U @ _Vt).astype(np.float32)
+        else:
+            Tw[:3, :3] = R1
         Tw[:3, 3]  = (1.0 - t) * p0 + t * p1
         ikr = ik_solver.solve_single(mat4_to_curobo_pose(Tw, tensor_args),
                                      cu_js_pos.view(1, -1), seed)

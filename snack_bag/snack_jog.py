@@ -26,6 +26,14 @@ def send(label=None):
     lbl = label or "cur"
     with open(JOG_FILE, "w") as f:
         f.write(f"{x:.4f} {y:.4f} {z:.4f} {lbl}\n")
+    if label and label != "cur":   # place/pre_shelf 등 named 위치는 JSON에도 저장
+        data = {}
+        if os.path.exists(JOG_SAVED):
+            try: data = json.load(open(JOG_SAVED))
+            except: pass
+        data[label] = {"xyz": [round(x,4), round(y,4), round(z,4)]}
+        with open(JOG_SAVED, "w") as f: json.dump(data, f, indent=2)
+        print(f"\r  [{label}] JSON 저장 완료 → {JOG_SAVED}", flush=True)
 
 def show_saved():
     if not os.path.exists(JOG_SAVED):
