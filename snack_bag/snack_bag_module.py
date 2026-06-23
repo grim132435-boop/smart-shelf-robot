@@ -39,8 +39,8 @@ FLAT_USD   = os.path.join(_ASSET_DIR, "snack_bag.usd")                 # 얇은 
 
 # 검증된 particle cloth 파라미터(cloth6: 촘촘 베개 + 빳빳한 호일 느낌, 84mm 빵빵, 안정). 실측 BOPP 필름 반영.
 CLOTH_PARAMS = dict(
-    pressure=11.0,       # 질소 공기압. 10→11: 옆스퀴즈 진입시 납작 방지·두께 유지(12 근처 폭발 주의)
-    stretch=8000.0,      # ★비신축↑(5000→8000): 옆 누르면 부피가 두께로(불룩 강화). 1e4↑는 꿀렁/스파이크
+    pressure=11.0,       # 질소 공기압(빵빵↑). 앞선 11 폭발은 friction 0 탓 → friction 2면 안정. 12+는 PBD 한계(폭발)
+    stretch=6000.0,      # ★안정(8000은 그립 스퀴즈서 폭발 확인). 1e4↑는 꿀렁/스파이크
     bend=150.0,          # 과대 bend는 불안정 → 적당히
     shear=50.0,
     damping=4.0,         # 출렁임 제거(8↑은 폭발)
@@ -48,14 +48,18 @@ CLOTH_PARAMS = dict(
     sro=0.0025,          # solid_rest_offset
     # ★내용물(contents)/소성/B는 포기(2026-06-16) — PBD cm스케일서 cloth+내용물 반복 폭발, 탄성 수용.
     contents=False,
-    friction=2.2,        # 그리퍼 그립 마찰(1.6→2.2: 옆스퀴즈 그립 유지력↑, 리프트시 안빠짐)
-    pbd_damping=14.0,    # ★전역 입자 속도 감쇠(핀치 에너지 흡수 강화 10→14 — spring_damping↑은 폭발하므로 이걸로)
-    max_velocity=1.0,    # ★입자 최대속도 제한(크러시시 폭발 속도 클램프 2→1)
+    friction=2.0,        # ★안정 하한(2→4 했다 복귀). 카테리-보조라 그립 힘 불요 → 안정 우선
+    pbd_damping=18.0,    # ★전역 입자 속도 감쇠(14→18, 단일 입자 스파이크 에너지 흡수)
+    max_velocity=0.2,    # ★입자 최대속도 제한(0.3→0.2, 그리퍼 끼임 튕김 스파이크 클램프)
+    # max_depen_velocity 제거 — 0.5는 부풀림 단계서 입자분리 막아 spawn전 폭발(역효과)
     adhesion=0.0,        # B(접착 구김고정)는 접음 — C(알맹이)가 소성 담당
     adhesion_scale=1.0,
     friction_scale=0.5,  # ★입자간 마찰(폴드 유지·내부 안정, DexGarmentLab)
     gravity_scale=1.0,   # ★중력 명시(파티클 시스템이 중력 적용 — RigidBody API 아님)
     mass=0.052,          # 52g
+    pillow_density=1.0,  # ★절차적 베개 사용(폭 조절 위해). 1.0=5mm격자(USD와 동일)
+    pillow_hx=0.06,      # ★폭 12cm(16→12, 0.75배 — 사용자). 그리퍼 span 11cm 근처
+    pillow_hy=0.086,     # ★길이도 비율 축소(23→17.25cm, 0.75배 — 사용자)
 )
 
 
@@ -99,6 +103,100 @@ def _load_weld_triangulate(usd_path, tol=1e-4):
     return [Gf.Vec3f(*p) for p in newpts], tris
 
 
+def add_snack_stand(stage, prim_path, center_xy, base_z,
+                    width=0.164, depth=0.14, height=0.127):
+    """과자봉지 거치대 = 삼각 프리즘(직육면체 대각선 컷, 옆에서 직각삼각형). 봉지를 비스듬히 기대 세움.
+    가로 width(x), 밑변 depth(y), 높이 height(z). 직각=뒤-아래, 빗변=앞-아래→뒤-위(봉지가 빗변에 기댐).
+    정적 콜라이더(convexHull)로 봉지가 위에 안착. center_xy=(cx,cy) 밑면 중심, base_z=바닥판 윗면 z."""
+    cx, cy = center_xy
+    hw, D, H = width / 2.0, depth, height
+    y0, y1 = cy - D / 2.0, cy + D / 2.0   # 앞(y0)·뒤(y1)
+    # 단면(y,z): A=앞아래(y0,base), B=뒤아래(y1,base), C=뒤위(y1,base+H). 직각@B, 빗변 A-C
+    pts = [
+        Gf.Vec3f(cx - hw, y0, base_z), Gf.Vec3f(cx - hw, y1, base_z), Gf.Vec3f(cx - hw, y1, base_z + H),  # 좌단 A0,B0,C0
+        Gf.Vec3f(cx + hw, y0, base_z), Gf.Vec3f(cx + hw, y1, base_z), Gf.Vec3f(cx + hw, y1, base_z + H),  # 우단 A1,B1,C1
+    ]
+    # 면: 양끝 삼각 2 + 옆 쿼드 3(밑/뒤/빗변)
+    tris = [
+        0, 1, 2,  3, 5, 4,                 # 좌단(ABC) / 우단(ACB 역향)
+        0, 3, 4, 0, 4, 1,                  # 밑면 A0A1B1B0
+        1, 4, 5, 1, 5, 2,                  # 뒷면 B0B1C1C0
+        0, 2, 5, 0, 5, 3,                  # 빗변 A0C0C1A1
+    ]
+    mesh = UsdGeom.Mesh.Define(stage, prim_path)
+    mesh.CreatePointsAttr(pts)
+    mesh.CreateFaceVertexCountsAttr([3] * (len(tris) // 3))
+    mesh.CreateFaceVertexIndicesAttr(tris)
+    mesh.CreateSubdivisionSchemeAttr("none")
+    mesh.CreateDisplayColorAttr([Gf.Vec3f(0.2, 0.2, 0.22)])
+    prim = mesh.GetPrim()
+    UsdPhysics.CollisionAPI.Apply(prim)
+    _mc = UsdPhysics.MeshCollisionAPI.Apply(prim)
+    _mc.CreateApproximationAttr().Set("convexHull")   # 정적 콜라이더(쐐기=볼록)
+    # ★봉지 받침 턱: 빗변 앞-아래 끝(y0)에 얇은 판을 빗변과 평행히(x축 37.4°) 세워 봉지 흘러내림 방지.
+    #   사용자 Isaac 에디터 배치값 재현 — pos≈(cx, y0, base+6mm), rotX 37.427°, dims 폭×5.35mm×28.9mm.
+    #   ★받침턱 높이 키움(0.01181→0.02892, 2026-06-19 사용자 에디터값 — 봉지 걸림 안정).
+    lip = UsdGeom.Cube.Define(stage, prim_path + "/lip")
+    lip.CreateSizeAttr(1.0)
+    lip.CreateDisplayColorAttr([Gf.Vec3f(0.2, 0.2, 0.22)])
+    lipx = UsdGeom.Xformable(lip)
+    lipx.AddTranslateOp().Set(Gf.Vec3d(cx, y0, base_z + 0.006))
+    lipx.AddRotateXOp().Set(37.427)
+    lipx.AddScaleOp().Set(Gf.Vec3f(width, 0.00535, 0.02892))
+    UsdPhysics.CollisionAPI.Apply(lip.GetPrim())   # box 정적 콜라이더
+    return prim_path
+
+
+def _make_pillow_mesh(center_half=0.035, density=1.0, edge_half=0.0005, hx=0.08, hy=0.115):
+    """베개 메시를 절차적으로 생성(USD 외부파일 불요 — pxr가 SimApp 후에만 되므로 런타임 생성).
+    density↑ = 촘촘(작은 유체 입자 담으려면 천 격자도 촘촘해야 누수 방지). 반환 (points[Gf.Vec3f], tri_indices).
+    가장자리 두께≈0(두 시트 만남), 중앙 center_half, (1-u²)(1-v²) 테이퍼. make_pillow_cloth.py 포팅."""
+    NU, NV = int(32 * density), int(46 * density)
+
+    def half_thick(u, v):
+        return edge_half + (center_half - edge_half) * (1 - u * u) * (1 - v * v)
+
+    pts = []
+    idx = {}
+
+    def add(i, j, top):
+        key = (i, j, top)
+        if key in idx:
+            return idx[key]
+        u = -1 + 2 * i / NU
+        v = -1 + 2 * j / NV
+        z = half_thick(u, v) * (1 if top else -1)
+        idx[key] = len(pts)
+        pts.append(Gf.Vec3f(u * hx, v * hy, z))
+        return idx[key]
+
+    tris = []
+
+    def quad(a, b, c, d):
+        tris.extend([a, b, c, a, c, d])
+
+    for i in range(NU):
+        for j in range(NV):
+            quad(add(i, j, True), add(i + 1, j, True), add(i + 1, j + 1, True), add(i, j + 1, True))
+    for i in range(NU):
+        for j in range(NV):
+            quad(add(i, j, False), add(i, j + 1, False), add(i + 1, j + 1, False), add(i + 1, j, False))
+    loop = []
+    for i in range(NU):
+        loop.append((i, 0))
+    for j in range(NV):
+        loop.append((NU, j))
+    for i in range(NU, 0, -1):
+        loop.append((i, NV))
+    for j in range(NV, 0, -1):
+        loop.append((0, j))
+    for k in range(len(loop)):
+        i0, j0 = loop[k]
+        i1, j1 = loop[(k + 1) % len(loop)]
+        quad(add(i0, j0, True), add(i1, j1, True), add(i1, j1, False), add(i0, j0, False))
+    return pts, tris
+
+
 def add_snack_contents(stage, center_xy, rest_center_z, particle_system_path=None,
                        path="/World/snack_contents", total_mass=0.04,
                        spacing=0.035, group=1, half=(0.025, 0.06, 0.0)):
@@ -140,6 +238,29 @@ def add_snack_contents(stage, center_xy, rest_center_z, particle_system_path=Non
     return path, n
 
 
+def add_snack_fluid(stage, system_path, center_xy, rest_center_z, fluid_rest_offset,
+                    path="/World/snack_fluid", half=(0.065, 0.095, 0.024),
+                    total_mass=0.01, particle_group=0):
+    """봉지 안 '공기'를 PBD 유체 입자로 채움(비압축 → 스퀴즈시 단단·물풍선식, 압력구속보다 안정).
+    봉지 내부 부피를 격자로 샘플. 같은 파티클 시스템(천과 상호작용 → 유체가 천을 밀어 부풀림)."""
+    cx, cy = center_xy
+    hx, hy, hz = half
+    sp = 2.0 * fluid_rest_offset           # 유체 입자 간격
+    xs = [cx - hx + i * sp for i in range(int(2 * hx / sp) + 1)]
+    ys = [cy - hy + j * sp for j in range(int(2 * hy / sp) + 1)]
+    zs = [rest_center_z - hz + k * sp for k in range(int(2 * hz / sp) + 1)]
+    pos = [(x, y, z) for x in xs for y in ys for z in zs]
+    n = len(pos)
+    vel = [(0.0, 0.0, 0.0)] * n
+    widths = [2.0 * fluid_rest_offset] * n
+    particleUtils.add_physx_particleset_points(
+        stage, path=path, positions_list=pos, velocities_list=vel, widths_list=widths,
+        particle_system_path=system_path, self_collision=True, fluid=True,
+        particle_group=particle_group, particle_mass=total_mass / max(n, 1), density=0.0,
+    )
+    return path, n
+
+
 def _spawn_cloth(stage, scene_path, center_xy, rest_center_z, prim_path, params):
     """particle cloth 인플레이터블 봉지(베개 메시). 반환 bag prim path."""
     cx, cy = center_xy
@@ -149,9 +270,11 @@ def _spawn_cloth(stage, scene_path, center_xy, rest_center_z, prim_path, params)
             stage, psys_path, simulation_owner=scene_path,
             contact_offset=params["pco"], rest_offset=params["pco"] * 0.8,
             particle_contact_offset=params["pco"], solid_rest_offset=params["sro"],
+            fluid_rest_offset=params.get("fluid_rest_offset", None),   # ★유체 충전 시 필요(봉지 속 공기=유체 입자)
             solver_position_iterations=params.get("solver", 32), enable_ccd=True,   # 비신축(고stretch)엔 ↑ 필요(안정)
             non_particle_collision_enabled=True,   # 바닥/그리퍼 등 강체와 충돌
             max_velocity=params.get("max_velocity", 2.0),     # ★입자 속도 상한(출렁임 억제)
+            max_depenetration_velocity=params.get("max_depen_velocity", None),  # ★겹침후 튕김속도 클램프(뾰족 스파이크 억제)
         )
     pmat_path = "/World/Physics_Materials/snack_pbd"
     if not stage.GetPrimAtPath(pmat_path):
@@ -163,10 +286,18 @@ def _spawn_cloth(stage, scene_path, center_xy, rest_center_z, prim_path, params)
             particle_friction_scale=params.get("friction_scale", 1.0),# ★입자간 마찰(폴드 유지·내부 안정, DexGarmentLab 0.5)
             adhesion_offset_scale=params.get("adhesion_offset_scale", 0.0),  # adhesion fall-off 거리(×rest offset)
             gravity_scale=params.get("gravity_scale", 1.0),           # ★중력 명시(1.0=정상 중력). 입자는 시스템이 중력 적용
+            cohesion=params.get("cohesion", None),                    # 유체 입자 응집(공기=낮게)
+            viscosity=params.get("viscosity", None),                  # 유체 점성(안정화)
+            surface_tension=params.get("surface_tension", None),      # 유체 표면장력
         )
     physicsUtils.add_physics_material_to_prim(stage, stage.GetPrimAtPath(psys_path), pmat_path)
 
-    pts, tris = _load_weld_triangulate(params.get("mesh_usd", PILLOW_USD))   # 기본=부푸는 베개(평평은 PBD서 안 부풂)
+    if params.get("pillow_density"):   # 절차적 베개(폭/촘촘도 조절 — USD standalone 생성 불가 우회)
+        pts, tris = _make_pillow_mesh(center_half=params.get("pillow_center_half", 0.035),
+                                      density=params["pillow_density"],
+                                      hx=params.get("pillow_hx", 0.08), hy=params.get("pillow_hy", 0.115))
+    else:
+        pts, tris = _load_weld_triangulate(params.get("mesh_usd", PILLOW_USD))   # 기본=부푸는 베개(평평은 PBD서 안 부풂)
     mesh = UsdGeom.Mesh.Define(stage, prim_path)
     mesh.CreatePointsAttr(pts)
     mesh.CreateFaceVertexCountsAttr([3] * (len(tris) // 3))
@@ -187,6 +318,15 @@ def _spawn_cloth(stage, scene_path, center_xy, rest_center_z, prim_path, params)
                                    total_mass=params.get("contents_mass", 0.04),
                                    spacing=params.get("contents_spacing", 0.012))
         print(f"[snack_bag_module] 알맹이 {_n}개 생성(총 {params.get('contents_mass',0.04)*1000:.0f}g)", flush=True)
+
+    # 유체 충전(봉지 속 '공기'=PBD 유체 입자) — 비압축이라 스퀴즈시 단단·안정(압력구속 대체/보완)
+    if params.get("fluid_fill", False):
+        _fro = params.get("fluid_rest_offset", params["pco"] * 0.6)
+        _fp, _fn = add_snack_fluid(stage, psys_path, center_xy, rest_center_z, _fro,
+                                   total_mass=params.get("fluid_mass", 0.01),
+                                   half=params.get("fluid_half", (0.065, 0.095, 0.024)),
+                                   particle_group=1)
+        print(f"[snack_bag_module] 유체 입자 {_fn}개 충전(공기, fluid_rest_offset={_fro:.4f})", flush=True)
     return prim_path
 
 
@@ -283,6 +423,32 @@ def apply_plastic_yield(stage, root_prim_path, sim_mesh_subpath="/simMesh"):
         return False
     rest_attr.Set(cur)
     return True
+
+
+def rigidify_bag(stage, bag_path="/World/snack_bag",
+                 particle_system_path="/World/snackParticleSystem"):
+    """봉지 강체화(파지 운반용) — 사용자 아이디어 '집으면 강체 변경'.
+    파티클 시스템을 정지(cloth 시뮬 동결 → 봉지가 정적 메시=강체처럼 거동)시키고, 현재 월드 AABB
+    중심·치수를 반환한다. 반환값으로 cuRobo Cuboid 프록시를 만들어 attach하면 캔/병과 동일한
+    carry/place plan_single이 봉지 부피를 무충돌 인지한다(매대 회피). 물성 복귀는 soften_bag().
+    반환: (center_world (x,y,z), dims (dx,dy,dz)) — meter 튜플."""
+    ps = stage.GetPrimAtPath(particle_system_path)
+    if ps and ps.IsValid():
+        PhysxSchema.PhysxParticleSystem(ps).CreateParticleSystemEnabledAttr().Set(False)
+    bag = stage.GetPrimAtPath(bag_path)
+    bb = UsdGeom.Imageable(bag).ComputeWorldBound(
+        Usd.TimeCode.Default(), UsdGeom.Tokens.default_).ComputeAlignedRange()
+    mn, mx = bb.GetMin(), bb.GetMax()
+    center = ((mn[0] + mx[0]) / 2.0, (mn[1] + mx[1]) / 2.0, (mn[2] + mx[2]) / 2.0)
+    dims = (mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2])
+    return center, dims
+
+
+def soften_bag(stage, particle_system_path="/World/snackParticleSystem"):
+    """봉지 물성 복귀 — 파티클 시스템 재활성(적치 직전 호출). cloth가 다시 시뮬되어 거치대 빗면에 안착."""
+    ps = stage.GetPrimAtPath(particle_system_path)
+    if ps and ps.IsValid():
+        PhysxSchema.PhysxParticleSystem(ps).CreateParticleSystemEnabledAttr().Set(True)
 
 
 def spawn_snack_bag(stage, scene_path, center_xy, rest_center_z,

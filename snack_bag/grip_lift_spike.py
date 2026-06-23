@@ -14,6 +14,9 @@ parser.add_argument("--friction", type=float, default=25.0, help="입자-강체 
 parser.add_argument("--adhesion", type=float, default=0.0, help="입자-강체 들러붙음(과하면 표면붙어 늘어남/바닥붙음)")
 parser.add_argument("--fscale", type=float, default=0.5, help="particle_friction_scale")
 parser.add_argument("--ascale", type=float, default=0.5, help="particle_adhesion_scale")
+parser.add_argument("--fluid", action="store_true", help="봉지 속 공기=PBD 유체 입자 충전(비압축→스퀴즈시 단단)")
+parser.add_argument("--fro", type=float, default=0.004, help="fluid_rest_offset(유체 입자 크기, 누수방지 위해 cloth격자≈5mm 근처)")
+parser.add_argument("--dense", action="store_true", help="촘촘 베개(~3mm)+작은 입자(물같은 공기). 작은 유체 누수방지")
 args = parser.parse_args()
 
 from omni.isaac.kit import SimulationApp
@@ -43,12 +46,23 @@ scene_path = enable_gpu_dynamics(stage)
 _fmat = PhysicsMaterial(prim_path="/World/Physics_Materials/finger_mat",
                         static_friction=2.2, dynamic_friction=2.0, restitution=0.0)
 
+_params = {"pressure": args.pressure, "stretch": args.stretch, "bend": 150.0, "shear": 50.0,
+           "friction": args.friction, "adhesion": args.adhesion,
+           "friction_scale": args.fscale, "adhesion_scale": args.ascale,
+           "mesh_usd": MESH, "pco": 0.005, "sro": 0.0025, "solver": args.solver,
+           "pbd_damping": 14.0, "max_velocity": 0.3, "gravity_scale": 1.0}   # ★스퀴즈 폭발 억제(튕김 클램프)
+if args.dense:   # 촘촘 베개(~3mm 격자) + 작은 offset → 작은 유체 입자 담아 누수방지
+    _params.update({"pillow_density": 1.6, "pco": 0.0032, "sro": 0.0016})
+    if args.fro >= 0.003:   # dense면 입자도 작게(물처럼)
+        args.fro = 0.0018
+if args.fluid:   # 봉지 속 공기=PBD 유체 입자(비압축→스퀴즈시 단단·안정)
+    _params.update({"fluid_fill": True, "fluid_rest_offset": args.fro,
+                    "cohesion": 10.0, "viscosity": 250.0, "surface_tension": 0.02,   # ★액체답게(뭉쳐 흐름→누수↓·단단)
+                    "fluid_mass": 0.01,
+                    "fluid_half": (0.045, 0.070, 0.014),   # ★봉지 중앙 공동에 맞게 축소(밖으로 안 새게)
+                    "max_depen_velocity": 1.0})            # ★강체-입자 접촉 폭발 클램프
 spawn_snack_bag(stage, scene_path, (0.0, 0.0), REST_Z, mode="cloth", prim_path="/World/snack_bag",
-                params={"pressure": args.pressure, "stretch": args.stretch, "bend": 150.0, "shear": 50.0,
-                        "friction": args.friction, "adhesion": args.adhesion,
-                        "friction_scale": args.fscale, "adhesion_scale": args.ascale,
-                        "mesh_usd": MESH, "pco": 0.005, "sro": 0.0025, "solver": args.solver,
-                        "pbd_damping": 14.0, "max_velocity": 1.0, "gravity_scale": 1.0})
+                params=_params)
 
 def mk(name, x):   # 2cm 폭, z 10cm(옆면 전체 덮음), 위에서 연결된 프롱
     f = DynamicCuboid(prim_path=f"/World/{name}", name=name,
@@ -100,25 +114,25 @@ _step = 0
 while simulation_app.is_running():
     world.step(render=True)
     _step += 1
-    # 100~200 옆 스퀴즈(x: 0.10→grip, 4.3cm 침투) / 200~280 유지 / 280~430 리프트(쥔 채 z↑)
-    if _step < 100:
+    # 120~380 옆 스퀴즈(천천히, 급격겹침→폭발 방지) / 380~450 유지 / 450~600 리프트(쥔 채 z↑)
+    if _step < 120:
         set_fingers(X_OPEN)
-    elif 100 <= _step < 200:
-        t = (_step - 100) / 100.0
+    elif 120 <= _step < 380:
+        t = (_step - 120) / 260.0
         set_fingers(X_OPEN + (args.grip - X_OPEN) * t)
-    elif 200 <= _step < 280:
+    elif 380 <= _step < 450:
         set_fingers(args.grip)
-    elif 280 <= _step < 430:
-        t = (_step - 280) / 150.0
+    elif 450 <= _step < 600:
+        t = (_step - 450) / 150.0
         set_fingers(args.grip, FINGER_Z + (0.30 - FINGER_Z) * t)
-    if _step == 95:
+    if _step == 115:
         _t0 = thick(); _z0 = avgz()
         print(f"[GRIPLIFT] 부풀림 두께={_t0}mm 평균z={_z0:.0f}mm (목표 두께≈70)", flush=True); shot("01_inflated")
-    if _step == 275:
+    if _step == 445:
         _t1 = thick()
         _b = (_t1 - _t0) if (_t1 is not None and _t0 is not None) else None
         print(f"[GRIPLIFT] 스퀴즈 두께={_t1}mm (불룩 {_b:+}mm, 목표 7→9.5cm=+25)", flush=True); shot("02_squeeze")
-    if _step == 440:
+    if _step == 610:
         _z1 = avgz()
         _d = (_z1 - _z0) if (_z1 is not None and _z0 is not None) else None
         shot("03_lift")

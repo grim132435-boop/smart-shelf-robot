@@ -160,6 +160,9 @@ def set_gripper(ctrl, robot_art, sim_js_names, my_world, angle, steps=60):
         return
     try:
         cur = float(robot_art.get_joint_positions()[gidx[0]])
+        # ★그리퍼 균일속도(사용자): 스텝을 |목표-현재| 각도변화에 비례 → 파지·오픈 속도 일정.
+        #   0.035rad/스텝(사용자: 파지속도 느림 → 0.02→0.035로 빠르게). 작은 변화는 최소 4스텝.
+        steps = max(4, int(round(abs(float(angle) - cur) / 0.035)))
         for t in np.linspace(0.0, 1.0, max(steps, 2)):
             tgt = (1.0 - t) * cur + t * float(angle)
             ctrl.apply_action(ArticulationAction(
@@ -241,6 +244,10 @@ def move_linear_ik(start_world, target_world, ik_solver, tensor_args, cu_js_pos,
     p0 = np.asarray(start_world[:3, 3],  dtype=np.float64)
     p1 = np.asarray(target_world[:3, 3], dtype=np.float64)
     R  = target_world[:3, :3]                     # 자세 고정(직립 유지)
+    # ★TCP 균일속도(사용자): 웨이포인트를 거리비례로 산출(고정 waypoints면 짧은구간 느리고 긴구간 빠름).
+    #   웨이포인트당 12mm → 모든 moveL 구간의 TCP 선속도 동일. (4mm는 너무 잘아 텍타임 3배 → 12mm로 적정화)
+    _dist = float(np.linalg.norm(p1 - p0))
+    waypoints = max(8, int(round(_dist / 0.012)))
     q_prev = cu_js_pos.view(-1).cpu().numpy()[:nA].astype(np.float32)
     seed   = cu_js_pos.view(1, 1, -1)
     clr_min = None                             # [간격로깅]
